@@ -36,6 +36,8 @@ namespace RimbisectProbe
         private static Timer watchdog;
         internal static bool staticsDone;
         private static int idleWatches;
+        private static int stalledWatches;
+        private static long lastUpdate;
 
         private static StreamWriter events;
         private static int messagesSeen;
@@ -88,6 +90,37 @@ namespace RimbisectProbe
             KeepLogging();
             CheckErrorDialogs();
             CheckStillAtMenu();
+            CheckStillUpdating();
+        }
+
+        internal static void Updated()
+        {
+            Interlocked.Exchange(ref lastUpdate, DateTime.UtcNow.Ticks);
+        }
+
+        // Root_Play wraps a whole frame in one try/catch, so a mod that throws every frame
+        // before the game components update also keeps the probe from ending the trial.
+        private static void CheckStillUpdating()
+        {
+            if (!sawPlayScene)
+            {
+                return;
+            }
+            bool loading;
+            try
+            {
+                loading = LongEventHandler.AnyEventNowOrWaiting;
+            }
+            catch (Exception)
+            {
+                loading = true;
+            }
+            bool updated = DateTime.UtcNow.Ticks - Interlocked.Read(ref lastUpdate) < TimeSpan.TicksPerSecond;
+            stalledWatches = loading || updated ? 0 : stalledWatches + 1;
+            if (stalledWatches >= 60)
+            {
+                GiveUp("the game stopped updating, as it does when an error is thrown every frame");
+            }
         }
 
         // The game only loads the save when it starts in dev mode; otherwise, or when a mod
@@ -323,6 +356,7 @@ namespace RimbisectProbe
         // there still ends after three times as long in real time.
         public override void GameComponentUpdate()
         {
+            Probe.Updated();
             // Also called at the main menu.
             if (!Probe.Active || done || Current.ProgramState != ProgramState.Playing)
             {

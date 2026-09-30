@@ -1,6 +1,7 @@
 import argparse
 import json
 import os
+import sys
 import time
 from contextlib import contextmanager
 from datetime import datetime
@@ -430,6 +431,29 @@ def test_an_inconclusive_run_is_tried_again_only_with_other_options(env, capsys)
     assert json.loads((run / "run.json").read_text(encoding="utf-8"))["args"]["timeout"] == 40
 
 
+def _shown_once():
+    shown = []
+
+    def rule(mods):
+        # Only the first list with m11 shows the error.
+        shown.append("m11" in mods)
+        return shown.count(True) == 1 and shown[-1]
+    return rule
+
+
+def test_an_inconclusive_run_is_only_tried_again_in_a_way_that_can_change_the_answer(env, capsys):
+    env["rule"] = _shown_once()
+    assert cli.main(["bisect", *env["args"], "--match", "cross-reference", "--repeats", "2"]) == 1
+    _, run = reports(env)
+    capsys.readouterr()
+    assert cli.main(["resume", str(run), "--timeout", "40"]) == 2
+    assert "--repeats higher than 2" in capsys.readouterr().err
+    assert cli.main(["resume", str(run), "--repeats", "1"]) == 2
+    assert "each passing list up to 2 times" in capsys.readouterr().err
+    env["rule"] = lambda mods: "m11" in mods
+    assert cli.main(["resume", str(run), "--repeats", "4"]) == 0
+
+
 def test_resume_takes_the_pick_a_stopped_run_is_waiting_for(env, capsys):
     assert cli.main(["bisect", *env["args"]]) == 2
     assert cli.main(["resume", "--workdir", str(env["work"]), "--pick", "1", "--json"]) == 0
@@ -608,8 +632,22 @@ def test_double_click_runs_a_bisect_and_waits_before_closing(clicked, capsys):
     assert cli.main() == 0
     data, _ = reports(clicked)
     assert [c["packageId"] for c in data["culprits"]] == ["m11"]
-    assert "no such save" in capsys.readouterr().err
+    err = capsys.readouterr().err
+    assert "no such save" in err
+    assert err.rstrip().endswith("rimbisect found Mod m11. To play without the error, turn it off in the "
+                                 "game's Mods screen.")
     assert clicked["prompts"][-1].endswith("Press Enter to close this window.")
+
+
+def test_a_long_run_shows_progress_in_the_title_and_rings_when_done(env, capsys, monkeypatch):
+    titles = []
+    monkeypatch.setattr(cli, "_title", titles.append)
+    monkeypatch.setattr(cli, "LONG_RUN", 0)
+    monkeypatch.setattr(sys.stderr, "isatty", lambda: True)
+    assert cli.main(["bisect", *env["args"], "--match", "cross-reference"]) == 0
+    assert titles[0] == "rimbisect: 1 of about 8 to 15 trials"
+    assert titles[-1].startswith(f"rimbisect: {len(reports(env)[0]['trials'])} of about")
+    assert capsys.readouterr().err.endswith("\a")
 
 
 def test_double_click_offers_to_resume(clicked, capsys):
@@ -666,7 +704,7 @@ def test_double_click_starts_over_when_the_mod_list_changed(clicked, capsys):
     assert cli.main() == 0
     err = capsys.readouterr().err
     assert "the active mod list changed since this run started, so a new run starts" in err
-    assert "turn the culprits off" in err
+    assert "rimbisect found Mod m11. To play" in err
     assert len(list((clicked["work"] / "runs").iterdir())) == 2
 
 
@@ -683,6 +721,24 @@ def test_double_click_asks_where_the_game_is(clicked, capsys, monkeypatch):
     assert "does not contain RimWorldWin64.exe" in capsys.readouterr().err
     assert json.loads(next((clicked["work"] / "runs").iterdir()).joinpath("run.json").read_text(
         encoding="utf-8"))["args"]["game"] == str(clicked["root"])
+
+
+@pytest.mark.parametrize("flaky, offer, option", [
+    (False, "giving each trial up to 40 minutes", ("timeout", 40)),
+    (True, "running each passing list up to 3 times", ("repeats", 3)),
+])
+def test_double_click_offers_to_try_a_run_without_an_answer_again(clicked, flaky, offer, option):
+    clicked["rule"] = _shown_once() if flaky else \
+        lambda mods: UNRESOLVED if "m05" in mods and len(mods) < 12 else "m11" in mods
+    clicked["answers"] = ["", "1", ""]
+    assert cli.main() == 1
+    clicked["rule"] = lambda mods: "m11" in mods
+    clicked["answers"] = ["", ""]
+    assert cli.main() == 0
+    assert "stopped without an answer" in clicked["prompts"][-2] and offer in clicked["prompts"][-2]
+    data, run = reports(clicked)
+    assert data["status"] == "found" and len(list((clicked["work"] / "runs").iterdir())) == 1
+    assert json.loads((run / "run.json").read_text(encoding="utf-8"))["args"][option[0]] == option[1]
 
 
 def test_double_click_without_input_stops(clicked, capsys, monkeypatch):

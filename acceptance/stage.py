@@ -12,6 +12,8 @@ acceptance/work. The source mod list is only read. The test mods:
     flood      logs 10,001 warnings while mods load, which switches the game's logging off,
                then 10,001 more at startup followed by the error rimbisectLateFloodError.
                Stage it into a brokendef list (--source) to check both errors are still seen.
+    savefail   logs an error when a save is loaded, never in a new colony (bisect with --save)
+    framefail  makes every frame throw once the map is up, before the probe's update runs
 """
 
 from __future__ import annotations
@@ -27,7 +29,7 @@ from rimbisect.install import default_config_dir, find_game  # noqa: E402
 from rimbisect.modlist import CORE, LoadOrder, read_mods_config, scan_mods  # noqa: E402
 
 HERE = Path(__file__).resolve().parent
-TEST_MODS = ("brokendef", "mapfail", "flood", "savefail")
+TEST_MODS = ("brokendef", "mapfail", "flood", "savefail", "framefail")
 
 
 def install(args) -> None:

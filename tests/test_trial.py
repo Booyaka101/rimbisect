@@ -1,6 +1,7 @@
 import re
 import subprocess
 import sys
+import threading
 import time
 from dataclasses import dataclass
 from pathlib import Path
@@ -130,6 +131,16 @@ def test_empty_prefs_is_replaced(launcher, tmp_path):
     assert "<runInBackground>True</runInBackground>" in (launcher.savedata / "Config" / "Prefs.xml").read_text(encoding="utf-8")
 
 
+def test_nothing_a_mod_writes_carries_over_to_the_next_trial(launcher, tmp_path):
+    prepare_savedata(tmp_path / "Config", launcher.savedata)
+    (launcher.savedata / "CameraPlus").mkdir()
+    (launcher.savedata / "CameraPlus" / "settings.xml").write_text("x")
+    (launcher.savedata / "Config" / "Mod_Foo_Settings.xml").write_text("x")
+    prepare_savedata(tmp_path / "Config", launcher.savedata)
+    assert sorted(p.name for p in launcher.savedata.iterdir()) == ["Config", "HugsLib"]
+    assert not (launcher.savedata / "Config" / "Mod_Foo_Settings.xml").exists()
+
+
 def test_exit_without_done_is_a_crash(launcher, monkeypatch):
     trial = run(launcher, monkeypatch, "exit")
     assert trial.outcome == CRASH
@@ -143,6 +154,15 @@ def test_timeout(launcher, monkeypatch, tmp_path):
     assert trial.outcome == UNRESOLVED
     assert "no result after 1s" in trial.excerpt
     assert not still_running(tmp_path / "pid")
+
+
+def test_a_trial_stopped_from_outside_gives_no_answer(launcher, monkeypatch, tmp_path):
+    # The console closing kills the game; the journal must not record that as a crash.
+    stopper = threading.Timer(2, launcher.stop)
+    stopper.start()
+    trial = run(launcher, monkeypatch, "hang")
+    stopper.join()
+    assert trial.outcome == UNRESOLVED and trial.excerpt == "stopped"
 
 
 def test_a_save_is_loaded_instead_of_a_new_colony(launcher, monkeypatch, tmp_path):

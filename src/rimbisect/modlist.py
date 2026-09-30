@@ -19,26 +19,14 @@ PROBE_FOLDER = "rimbisect-probe"
 STEAM_POSTFIX = "_steam"
 
 
-def _about(folder: Path) -> Path | None:
-    for name in ("About.xml", "about.xml"):
-        candidate = folder / "About" / name
-        if candidate.is_file():
-            return candidate
-    return None
-
-
 def _read(folder: Path, version: str, warnings: list[str], **kwargs) -> Mod | None:
-    about = _about(folder)
-    if about is None:
-        warnings.append(f"skipped {folder}: no About/About.xml")
-        return None
     try:
-        mod = parse_about(about, version, **kwargs)
-    except (OSError, etree.XMLSyntaxError) as exc:
+        mod = parse_about(folder / "About" / "About.xml", version, **kwargs)
+    except OSError as exc:
         warnings.append(f"skipped {folder}: could not read About.xml ({exc})")
         return None
-    if mod is None:
-        warnings.append(f"skipped {folder}: About.xml has no packageId")
+    if mod.problem:
+        warnings.append(f"{folder}: {mod.problem}; the game calls it {mod.package_id}, and so does rimbisect")
     return mod
 
 
@@ -48,14 +36,21 @@ def _subfolders(path: Path | None) -> list[Path]:
     return sorted((p for p in path.iterdir() if p.is_dir()), key=lambda p: p.name.lower())
 
 
+def _twice(package_id: str, first: Path, second: Path) -> str:
+    return (f"{package_id} is installed twice ({first} and {second}); "
+            "the game ignores the second copy and so does rimbisect")
+
+
 def scan_mods(game: Game, warnings: list[str]) -> dict[str, Mod]:
     """Every installed mod by lowercased packageId, the way the game indexes them.
 
     Local copies win over workshop copies of the same packageId; the game then gives the
-    workshop copy a "_steam" postfix, and so do we.
+    workshop copy a "_steam" postfix, and so do we. A second copy from the same place is
+    ignored.
     """
     version = game.short_version
     mods: dict[str, Mod] = {}
+    workshop: dict[str, Path] = {}
     for folder in _subfolders(game.data_dir):
         mod = _read(folder, version, warnings, official=True)
         if mod:
@@ -67,21 +62,22 @@ def scan_mods(game: Game, warnings: list[str]) -> dict[str, Mod]:
         if mod is None:
             continue
         if mod.package_id in mods:
-            warnings.append(f"{mod.package_id} is installed twice ({mods[mod.package_id].folder} and {folder}); "
-                            "the game ignores the second copy and so does rimbisect")
+            warnings.append(_twice(mod.package_id, mods[mod.package_id].folder, folder))
             continue
         mods[mod.package_id] = mod
     for folder in _subfolders(game.workshop_dir):
         mod = _read(folder, version, warnings, workshop_id=folder.name)
         if mod is None:
             continue
+        if mod.package_id in workshop:
+            warnings.append(_twice(mod.package_id, workshop[mod.package_id], folder))
+            continue
+        workshop[mod.package_id] = folder
         if mod.package_id in mods:
             local = mods[mod.package_id]
             warnings.append(f"{mod.package_id} is both a local mod ({local.folder}) and a workshop mod ({folder}); "
                             f"the local copy is {mod.package_id}, the workshop copy {mod.package_id}{STEAM_POSTFIX}")
             mod.package_id += STEAM_POSTFIX
-            if mod.package_id in mods:
-                continue
         mods[mod.package_id] = mod
     return mods
 
@@ -161,6 +157,9 @@ class LoadOrder:
         lo = cls(config, mods, warnings=warnings)
         for entry in config.active:
             key = entry.lower()
+            # Left behind when a local copy is removed; the game then falls back to the id without it.
+            if key not in mods and key.removesuffix(STEAM_POSTFIX) in mods:
+                key = key.removesuffix(STEAM_POSTFIX)
             if key == PROBE_ID or key in lo.spelling:
                 continue
             if key not in mods:
@@ -240,5 +239,5 @@ class LoadOrder:
         return [self.spelling.get(pid, pid) for pid in ids]
 
     def fixed_config(self, remove) -> str:
-        gone = {pid.lower() for pid in remove}
+        gone = {entry.lower() for entry in self.written(remove)}
         return self.config.to_xml([entry for entry in self.config.active if entry.lower() not in gone])

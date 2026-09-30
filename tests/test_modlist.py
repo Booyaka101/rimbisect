@@ -48,6 +48,7 @@ def game(tmp_path):
     workshop = tmp_path / "Steam Library ö" / "steamapps" / "workshop" / "content" / "294100"
     write_mod(workshop / "1111111111", "author.shared")
     write_mod(workshop / "2222222222", "author.lib")
+    write_mod(workshop / "3333333333", "author.lib")
     return Game(root, "1.6.4871 rev590")
 
 
@@ -59,10 +60,22 @@ def test_scan_follows_the_games_duplicate_rules(game):
     assert mods["author.lib"].workshop_id == "2222222222"
     assert mods[CORE].official
     assert PROBE_ID not in mods
+    # The game loads a folder without About.xml too, under an id it makes up.
+    assert mods["anonymous189.nohabout"].folder.name == "No About"
+    assert "author.lib_steam" not in mods
     joined = "\n".join(warnings)
-    assert "installed twice" in joined
-    assert "both a local mod" in joined
-    assert "No About" in joined
+    assert "author.shared is installed twice" in joined
+    assert "author.lib is installed twice" in joined
+    assert "both a local mod" in joined and "author.lib is both" not in joined
+    assert "No About: there is no About/About.xml; the game calls it anonymous189.nohabout" in joined
+
+
+def test_a_steam_entry_left_over_after_the_local_copy_went_is_the_workshop_mod(game, tmp_path):
+    config = read_mods_config(write_config(tmp_path / "ModsConfig.xml", ["Ludeon.RimWorld", "Author.Lib_steam"]))
+    warnings = []
+    order = LoadOrder.build(config, scan_mods(game, []), warnings)
+    assert order.order == [CORE, "author.lib"] and warnings == []
+    assert "Author.Lib_steam" not in order.fixed_config(["author.lib"])
 
 
 def write_config(path: Path, active, expansions=()) -> Path:

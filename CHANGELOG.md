@@ -1,5 +1,48 @@
 # Changelog
 
+## 0.2.2 - 2026-09-30
+
+A second review pass. Runs started by 0.2.1 can't be resumed with 0.2.2.
+
+Search:
+
+- When the error showed up once and then not again, a search that went on after the
+  first cause, or after the list without the changed mods, trusted that one failure and
+  could run for hundreds of trials naming innocent mods. Each search now checks the list
+  it starts from again and stops as inconclusive when it passes.
+- Cutting a group of culprits down no longer trusts a pass it saw earlier; it runs that
+  list again.
+- `resume` refuses to lower `--repeats`, and refuses to try an inconclusive run again with
+  options that would stop it the same way.
+
+Trials:
+
+- A mod that throws an error every frame kept the probe from ending the trial, which then
+  waited out the whole `--timeout`. The probe now gives up after half a minute without an
+  update and the trial counts as a crash.
+- Files a mod writes into the save data folder, like its own settings folder, no longer
+  carry over into the next trial.
+- Closing the console window mid-trial no longer records that trial as a crash.
+
+Mods:
+
+- `About.xml` is read the way the game reads it: text that isn't valid UTF-8, tags in the
+  wrong case, a file the game can't parse, a missing packageId and a mod folder without
+  `About.xml` all give the mod the id the game uses, where rimbisect used to drop it and
+  warn that it wasn't installed.
+- A `_steam` entry left in the mod list after its local copy was removed counts as the
+  Workshop copy, as in the game.
+- Two Workshop copies of the same mod are reported as installed twice.
+
+Guided mode and progress:
+
+- Double-clicking the exe after an inconclusive run offers to try it again from where it
+  stopped, with more repeats or a longer timeout depending on why it stopped.
+- The culprits are named once more at the end, since the trial list pushes them out of
+  view.
+- The window title shows the trial count, and the terminal bell rings when a run longer
+  than five minutes ends.
+
 ## 0.2.1 - 2026-09-30
 
 A review pass over 0.2.0. Runs started by 0.2.0 can't be resumed with 0.2.1.

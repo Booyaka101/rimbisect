@@ -51,16 +51,46 @@ def test_alternative_package_ids(tmp_path):
     assert dep.alternatives == ("dep.two",)
 
 
-def test_sloppy_xml_still_parses(tmp_path):
-    path = write(tmp_path, "<ModMetaData><name>Guns & Roses</name><packageId>g.r</packageId>"
-                           "<description>unclosed <b>tag</description></ModMetaData>")
+def test_xml_the_game_cannot_read_gets_the_id_the_game_makes_up(tmp_path):
+    path = write(tmp_path, "<ModMetaData><name>Guns & Roses</name><packageId>g.r</packageId></ModMetaData>",
+                 folder="Guns Mod")
     mod = parse_about(path, "1.6")
-    assert mod.package_id == "g.r"
-    assert "Guns" in mod.name
+    assert (mod.package_id, mod.name) == ("anonymous189.gunshmod", "Guns Mod")
+    assert "could not be read" in mod.problem
 
 
-def test_missing_package_id(tmp_path):
-    assert parse_about(write(tmp_path, "<ModMetaData><name>x</name></ModMetaData>"), "1.6") is None
+def test_missing_package_id_is_made_up_like_the_game_does(tmp_path):
+    path = write(tmp_path, "<ModMetaData><name>Old Mod</name><author>Bob</author>"
+                           "<description>Adds things.</description></ModMetaData>")
+    mod = parse_about(path, "1.6")
+    assert (mod.package_id, mod.name) == ("bob104.oldhmod", "Old Mod")
+    assert "no packageId" in mod.problem
+
+
+def test_a_folder_without_about_xml_is_still_a_mod_to_the_game(tmp_path):
+    (tmp_path / "Loose" / "About").mkdir(parents=True)
+    assert parse_about(tmp_path / "Loose" / "About" / "About.xml", "1.6").package_id == "anonymous189.loose"
+
+
+def test_text_is_decoded_like_the_game_does(tmp_path):
+    path = write(tmp_path, "")
+    path.write_bytes('<?xml version="1.0" encoding="utf-8"?><ModMetaData><name>Café</name>'
+                     '<packageId>bob.cafe</packageId></ModMetaData>'.encode("cp1252"))
+    assert parse_about(path, "1.6").package_id == "bob.cafe"
+    path.write_bytes('<?xml version="1.0" encoding="utf-16"?><ModMetaData><packageId>bob.wide</packageId>'
+                     '</ModMetaData>'.encode("utf-16"))
+    assert parse_about(path, "1.6").package_id == "bob.wide"
+    path.write_bytes(b'\xef\xbb\xbf<?xml version="1.0" encoding="utf-16"?><ModMetaData><packageId>bob.bom</packageId>'
+                     b'</ModMetaData>')
+    assert parse_about(path, "1.6").package_id == "bob.bom"
+
+
+def test_tags_in_the_wrong_case_still_count(tmp_path):
+    path = write(tmp_path, "<ModMetaData><PackageId>Bob.Case</PackageId><ModDependencies><li>"
+                           "<packageID>bob.lib</packageID></li></ModDependencies></ModMetaData>")
+    mod = parse_about(path, "1.6")
+    assert mod.package_id == "bob.case" and mod.problem is None
+    assert [d.package_id for d in mod.dependencies] == ["bob.lib"]
 
 
 def test_published_file_id_wins_over_folder_name(tmp_path):

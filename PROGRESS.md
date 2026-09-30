@@ -1,10 +1,10 @@
 # rimbisect progress
 
-State on 2026-09-30: version 0.2.1 is released, the fifth review round's fixes (below)
-on top of 0.2.0's `resume`, `--save`, standalone `rimbisect.exe` and error search by text.
-https://github.com/Booyaka101/rimbisect/releases/tag/v0.2.1 (commit 7770802, CI green,
-with the exe CI built from that commit) and https://pypi.org/project/rimbisect/0.2.1/,
-which installs into a fresh venv and runs.
+State on 2026-09-30: version 0.2.2, the sixth review round's fixes and small guided-mode
+additions (below) on top of 0.2.1's review fixes and 0.2.0's `resume`, `--save`,
+standalone `rimbisect.exe` and error search by text. 0.2.1 is released:
+https://github.com/Booyaka101/rimbisect/releases/tag/v0.2.1 (commit 7770802) and
+https://pypi.org/project/rimbisect/0.2.1/.
 
 ## Verified
 
@@ -54,6 +54,15 @@ All on the owner's PC: RimWorld 1.6.4871 (Steam, `D:\SteamLibrary`), i9-14900K, 
   mode forced off the game stayed at the main menu and the trial ended as a crash in
   12.8s instead of the 300s timeout. With the game's `DevModeDisabled` file present,
   which used to leave it broken, the save loaded.
+- **Error every frame, 0.2.2.** A test mod `rimbisect.acceptance.framefail` sets the
+  map's sky manager to null, so every frame throws before the game components update
+  (16,967 "Root level exception" lines in one trial). On the 0.2.1 probe a `check` with
+  `--timeout 2` ended as no answer after 120.2s. With the fix it ended as a crash in
+  53.7s with the probe's reason and the errors listed. `bisect --match-text "Root level
+  exception in Update"` on a 16 mod list found it in 8 trials, exit 0 (run
+  2026-09-30_17-50-07), and again on the final code (2026-09-30_18-07-53) while a watcher
+  listed the savedata folder every second: only `Config`, `HugsLib` and the game's own
+  `Saves`, reset at the start of each trial.
 - **Console closed mid-trial.** A `check` on that list, with Windows' close event sent to
   rimbisect while the game was running: rimbisect exited (0xC000013A) within the wait,
   no RimWorld process was left and the probe folder was gone from `Mods`. The same
@@ -97,7 +106,7 @@ All on the owner's PC: RimWorld 1.6.4871 (Steam, `D:\SteamLibrary`), i9-14900K, 
   RimWorld process was left. The probe folder was left in `Mods`, as the README says.
 - After every finished run the probe folder was gone from `<game>\Mods` and no RimWorld
   process was left. The real `ModsConfig.xml` and `Prefs.xml` were never written.
-- `python -m pytest`: 211 passed. `python -m pyflakes src tests acceptance/*.py` clean.
+- `python -m pytest`: 224 passed. `python -m pyflakes src tests acceptance/*.py` clean.
 - `python -m build` makes the wheel and sdist. The wheel's `RimbisectProbe.dll` matches
   `src/` by hash, installs into a fresh venv, and `rimbisect --version` and `mods` run
   from it.
@@ -191,6 +200,35 @@ Every one of the 12 tests added or changed was checked to fail on the 0.2.0 code
   in the README were low (`acceptance/simulate.py` now gives 18.2/23, 21.9/28 and
   24.4/30 mean/max trials for 64, 200 and 400 mods).
 
+Sixth round, for 0.2.2 (search and resume, trial lifecycle, mod parsing, and one reviewer
+looking for enhancements). Every one of the 18 tests added or changed was checked to fail
+on the 0.2.1 code.
+
+- Flaky errors again: the search after the first cause, and the one on the list without
+  the changed mods, started from a failure nobody had checked. A reviewer's scripts ran
+  about 650 trials and named bogus causes; they now stop as inconclusive after 10 to 19.
+  Leaving one culprit out reused a flaky pass; in the reviewer's seeded simulation wrong
+  answers went from 47 of 300 to 18 of 300. `acceptance/simulate.py` numbers unchanged.
+- `resume` let `--repeats` go down, and retried an inconclusive run with options that
+  could only stop it the same way.
+- A mod throwing every frame (Root_Play wraps the whole frame in one try/catch) kept the
+  probe's game component from updating, so the trial waited out `--timeout`. Found live
+  with a new test mod, see Verified.
+- Only `Config` and `HugsLib` were reset between trials; a finished run's savedata had
+  CameraPlus, DefaultSettingsBackup and Xenotypes folders carried along. The whole folder
+  is emptied now.
+- Closing the console mid-trial could journal the killed trial as a crash, which
+  `--crash-is-fail` would count as the error.
+- `About.xml`: lxml read files the game reads differently (bytes that aren't UTF-8, a
+  bare `&`, `<PackageId>`, no packageId, no `About.xml` at all), so the mod was dropped
+  with a false "not installed" warning. Ported from `Verse.ModMetaData` and
+  `DirectXmlLoader`: File.ReadAllText's decoding, case-insensitive field tags, defaults on
+  a parse error, and the made-up id (StableStringHash, ConvertToASCII). A leftover
+  `_steam` entry and two Workshop copies of one mod also follow the game now.
+- Enhancements built: guided mode offers to retry an inconclusive run with the option
+  that can change the answer, names the culprits again at the end, and the window title
+  shows the trial count; a run over five minutes rings the bell.
+
 Left as they are, on purpose:
 
 - No cap on the number of causes. Each group must fail on its own, and lists with many
@@ -201,6 +239,10 @@ Left as they are, on purpose:
 - `DebugSettings.pauseOnError` is left alone; it is off unless a player turns it on.
 - A flake that lands on the leave-one-out check itself can still leave a pair. Only
   `--repeats` catches that.
+- From the enhancement review: writing the fixed list into the game's `ModLists` folder
+  as an `.rml` (breaks the promise that rimbisect never writes game files, and the
+  import could not be checked live), `--suspects`, time estimates in minutes (trial
+  times vary tenfold within one run) and toast notifications.
 
 Not changed: `Translate()` on the probe's timer thread. It only runs when an error
 dialog is already open, and that dialog's title was translated on the main thread.
@@ -210,6 +252,10 @@ dialog is already open, and that dialog's title was translated on the main threa
 - The game falling back to Core alone after a load error (its log lines and the
   "RecoveredFromErrors" dialog) was tested with the fake game only.
 - The pawn-name signature change was tested with made-up log lines, not a live error.
+- The window title and the bell were not seen live; the run above had its output
+  redirected, which turns both off.
+- The `About.xml` cases were checked against the decompiled game, not by loading such
+  mods. A scan of all 243 installed mods gives the same ids before and after the change.
 - Guided mode (double-click) was tested live only up to its first question; the rest is
   covered by tests with a faked console.
 - The exe on another PC, and what SmartScreen does with it.
@@ -230,12 +276,12 @@ dialog is already open, and that dialog's title was translated on the main threa
    wheel, sdist and exe.
 
 To run the acceptance again: `python acceptance/stage.py install --size 200 --position 150`
-(or `--mod mapfail`, `--mod flood`, `--mod savefail`) installs the test mod and writes the list to
+(or `--mod mapfail`, `--mod flood`, `--mod savefail`, `--mod framefail`) installs the test mod and writes the list to
 `acceptance/work`, and `python acceptance/stage.py remove` removes the test mods. The
 game's own mod list has only 8 mods now, so add `--source acceptance/work/ModsConfig-200.xml`
 to reuse the saved 200 mod list. The
 test mod sources are in `acceptance/brokendef`, `acceptance/mapfail-src`,
-`acceptance/flood-src` and `acceptance/savefail-src`, the probe's in `probe-src` (`dotnet build -c Release` writes the
+`acceptance/flood-src`, `acceptance/savefail-src` and `acceptance/framefail-src`, the probe's in `probe-src` (`dotnet build -c Release` writes the
 DLL straight to `src/rimbisect/probe/Assemblies`). `acceptance/simulate.py` measures
 trial counts against a simulated game.
 
@@ -304,7 +350,6 @@ the report.
 Not built:
 
 - `--suspects ID,...` to search only some mods (the inverse of `--keep`).
-- A notification when a long run finishes.
 - Load order problems: rimbisect never reorders, so an order-only bug comes out as a set.
 - Errors that need play time, a raid or an event. `--save` covers errors that come
   from the save itself.

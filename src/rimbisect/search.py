@@ -96,10 +96,15 @@ class Search:
 
     def record(self, ids: Iterable[str], failed: bool) -> None:
         """Seed the cache with a result obtained elsewhere (the baseline)."""
-        self.baseline = set(ids)
         self.cache[self._key(ids)] = failed
-        self.seeded.add(self._key(ids))
+        self._start_from(ids)
         self.saw_pass |= not failed
+
+    def _start_from(self, ids: Iterable[str]) -> None:
+        """The failing list a search starts from. Everything it finds rests on that one
+        result, so it is checked again later, see _recheck_baseline."""
+        self.baseline = set(ids)
+        self.seeded.add(self._key(ids))
 
     def _unseed(self, ids: Iterable[str]) -> bool:
         """Forget a seeded result so the next fails() runs a trial; whether it was seeded."""
@@ -177,17 +182,24 @@ class Search:
         """Three or more mods needed together is rare, and it is also what a baseline failure
         that does not repeat looks like, which would go on for many trials. Once per search,
         see that the full list still fails."""
-        if self._unseed(self.baseline) and not self.fails(self.baseline, "full list again"):
-            raise Inconclusive("the error did not show again with the full list",
-                               "It may not show up every time; --repeats 3 runs each passing list "
-                               "up to three times")
+        if self._unseed(self.baseline) and not self.fails(self.baseline, "first failing list again"):
+            raise Inconclusive("the error did not show again on the list the search started from",
+                               self._flaky_advice())
+
+    def _flaky_advice(self) -> str:
+        more = self.repeats + 2
+        return f"It may not show up every time; --repeats {more} runs each passing list up to {more} times"
 
     def _minimal(self, found: set[str]) -> set[str]:
         """found without the mods the error turns out not to need, which a pass that should
-        have been a failure leaves in."""
+        have been a failure leaves in. Such a pass is run again rather than trusted."""
         for pid in [p for p in self.order.order if p in found]:
             rest = found - {pid}
-            if rest and self._key(rest) != self._key(found) and self.fails(rest, "without one culprit"):
+            if not rest or self._key(rest) == self._key(found):
+                continue
+            if self.known(rest) is False:
+                del self.cache[self._key(rest)]
+            if self.fails(rest, "without one culprit"):
                 found = rest
         return found
 
@@ -214,6 +226,7 @@ class Search:
             without = self.fails(unchanged, "without changed mods")
             if without:
                 self.log(f"the error reproduces without the {len(recent)} changed mods; searching the rest")
+                self._start_from(unchanged)
                 found = self.find(unchanged) if unchanged else set()
             self.excluded -= removed
             # With the changed mods allowed again, one of them can come back in as an
@@ -235,8 +248,7 @@ class Search:
             names = self.order.written([pid for pid in self.order.order if pid in found])
             raise Inconclusive(f"the mods the search narrowed down to ({', '.join(names[:5])}"
                                f"{', ...' if len(names) > 5 else ''}) do not show the error on their own",
-                               "The error may not show up every time; --repeats 3 runs each passing list "
-                               "up to three times")
+                               self._flaky_advice())
         return found
 
     def locate_all(self, candidates: list[str], changed: list[str] | None = None) -> list[set[str]]:
@@ -254,5 +266,6 @@ class Search:
             candidates = [c for c in candidates if c not in self.excluded]
             if not self.fails(candidates, "without the culprits"):
                 return groups
+            self._start_from(candidates)
             self.log(f"the error still happens without {', '.join(sorted(found))}; searching the rest")
             changed = None
