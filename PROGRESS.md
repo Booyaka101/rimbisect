@@ -1,7 +1,8 @@
 # rimbisect progress
 
-State on 2026-09-30: version 0.1.0 is built, tested on the real game and committed locally
-on `main`. Nothing is pushed or published.
+State on 2026-09-30: version 0.1.0 is released. https://github.com/Booyaka101/rimbisect
+(tag `v0.1.0`, CI green on Python 3.11 to 3.13 on Windows) and
+https://pypi.org/project/rimbisect/0.1.0/, which installs into a fresh venv and runs.
 
 ## Verified
 
@@ -148,12 +149,9 @@ dialog is already open, and that dialog's title was translated on the main threa
 
 ## Next steps for the owner
 
-1. Create the GitHub repo `Booyaka101/rimbisect` (the URLs in `pyproject.toml` point
-   there), push `main`, and add a CI workflow for `python -m pytest` on `windows-latest`
-   if you want one. The tests need Windows (`tasklist`, `.bat` fake game).
-2. `python -m build` and `twine upload dist/*`. The dist in `dist/` was built from the
-   final commit; rebuild if anything changes.
-3. First distribution step, below.
+1. First distribution step, below.
+2. Later releases: bump the version, wait for CI on the exact commit, then
+   `python -m build`, `twine upload dist/*`, tag and `gh release create`.
 
 To run the acceptance again: `python acceptance/stage.py install --size 200 --position 150`
 (or `--mod mapfail`, `--mod flood`) installs the test mod and writes the list to
