@@ -3,11 +3,13 @@
 from __future__ import annotations
 
 import json
+import os
 from collections.abc import Callable
 from dataclasses import asdict
 from datetime import datetime
 from pathlib import Path
 
+from . import __version__
 from .errors import UserError
 from .modlist import folder_mtime
 from .signature import Criterion
@@ -18,6 +20,10 @@ TRIALS_FILE = "trials.jsonl"
 PATH_OPTIONS = ("game", "config", "workdir")
 
 
+class StaleRun(UserError):
+    """The game or the mod list changed, so the recorded trials no longer answer for it."""
+
+
 class Journal:
     """Records every finished trial in the run folder. On a resumed run it answers from
     those records, in the order they ran, until the search asks for a mod list it did not
@@ -25,41 +31,69 @@ class Journal:
 
     def __init__(self, launcher: Launcher, run_dir: Path, log: Callable[[str], None]):
         self.launcher = launcher
+        self.run_dir = run_dir
         self.path = run_dir / TRIALS_FILE
         self.log = log
         recorded = read_trials(self.path)
-        # A trial that gave no answer gets another chance.
-        self.pending = [t for t in recorded if t.outcome != UNRESOLVED]
+        # Trials that gave no answer just before the run stopped get another chance.
+        while recorded and recorded[-1].outcome == UNRESOLVED:
+            recorded.pop()
+        self.pending = recorded
+        self.replayed: list[Trial] = []
+        # Also drops a line cut short when the run was killed while writing it.
+        self._rewrite(recorded)
         launcher.numbered = max((t.number for t in recorded), default=0)
-        if self.pending:
-            log(f"{len(self.pending)} trials of this run are recorded and are not run again")
+        # What the game could not load in the first trial that reported it, which is normal for this list.
+        not_loaded = _read(run_dir).get("notLoadedAtFirst")
+        self.not_loaded_saved = not_loaded is not None
+        if self.not_loaded_saved:
+            launcher.not_loaded_at_first = set(not_loaded)
+        if recorded:
+            log(f"{len(recorded)} trials of this run are recorded and are not run again")
 
     def run(self, mods: list[str], label: str, criterion: Criterion | None) -> Trial:
         if self.pending and self.pending[0].mods == mods:
             trial = self.pending.pop(0)
-            if self.launcher.not_loaded_at_first is None:
-                self.launcher.not_loaded_at_first = set(trial.not_loaded)
+            self.replayed.append(trial)
             self.launcher.trials.append(trial)
             return trial
         if self.pending:
             self.log(f"the search went another way than before; the {len(self.pending)} "
                      "recorded trials left are not used")
             self.pending.clear()
+            self._rewrite(self.replayed)
         trial = self.launcher.run(mods, label, criterion)
         with open(self.path, "a", encoding="utf-8") as fh:
-            fh.write(json.dumps(asdict(trial), ensure_ascii=False) + "\n")
+            fh.write(_line(trial))
+        if not self.not_loaded_saved and self.launcher.not_loaded_at_first is not None:
+            update(self.run_dir, notLoadedAtFirst=sorted(self.launcher.not_loaded_at_first))
+            self.not_loaded_saved = True
         return trial
+
+    def _rewrite(self, trials: list[Trial]) -> None:
+        _replace(self.path, "".join(_line(t) for t in trials))
+
+
+def _line(trial: Trial) -> str:
+    return json.dumps(asdict(trial), ensure_ascii=False) + "\n"
+
+
+def _replace(path: Path, text: str) -> None:
+    """Write through a temporary file, so a kill mid-write leaves the old file whole."""
+    temp = path.with_name(path.name + ".tmp")
+    temp.write_text(text, encoding="utf-8")
+    os.replace(temp, path)
 
 
 def read_trials(path: Path) -> list[Trial]:
     trials = []
     try:
-        lines = path.read_text(encoding="utf-8").splitlines()
+        lines = path.read_bytes().split(b"\n")
     except FileNotFoundError:
         return []
     for line in lines:
         try:
-            data = json.loads(line)
+            data = json.loads(line.decode("utf-8"))
             data["errors"] = [(text, repeats) for text, repeats in data["errors"]]
             trials.append(Trial(**data))
         except (ValueError, TypeError, KeyError):
@@ -72,6 +106,7 @@ def start(run_dir: Path, args, setup, changed: list[str] | None, changed_since: 
     order = setup.order
     state = {
         "started": datetime.now().isoformat(timespec="seconds"),
+        "version": __version__,
         "args": saved_args(args, setup.workdir),
         "game": setup.game.version,
         "modsConfig": str(setup.config_path),
@@ -90,15 +125,26 @@ def update(run_dir: Path, **fields) -> None:
 
 
 def _write(run_dir: Path, state: dict) -> None:
-    (run_dir / RUN_FILE).write_text(json.dumps(state, indent=1, ensure_ascii=False), encoding="utf-8")
+    _replace(run_dir / RUN_FILE, json.dumps(state, indent=1, ensure_ascii=False))
+
+
+def _read(run_dir: Path) -> dict:
+    """run.json as it is, or {} when it is missing or unreadable."""
+    try:
+        state = json.loads((run_dir / RUN_FILE).read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {}
+    return state if isinstance(state, dict) else {}
 
 
 def load(run_dir: Path) -> dict:
     path = run_dir / RUN_FILE
     try:
         state = json.loads(path.read_text(encoding="utf-8"))
-        if not isinstance(state.get("args"), dict) or not isinstance(state.get("mods"), dict):
-            raise ValueError("args or mods missing")
+        if (not isinstance(state, dict) or not isinstance(state.get("args"), dict)
+                or not isinstance(state.get("mods"), dict)
+                or not {"game", "changed", "changedSince"} <= state.keys()):
+            raise ValueError("parts of the run are missing")
     except FileNotFoundError:
         raise UserError(f"{run_dir} is not a bisect run rimbisect can resume (no {RUN_FILE})") from None
     except ValueError as exc:
@@ -127,12 +173,17 @@ def check_unchanged(state: dict, setup, log: Callable[[str], None]) -> None:
     """Refuse to resume when the trials already run no longer answer for the mod list, and
     warn about mods with newer files. Some mods write logs into their own folder every time
     the game starts, so newer files alone do not mean an update."""
+    # Another version may group errors differently and so decide trials differently.
+    # 0.2.0 did not record its version.
+    if state.get("version", "0.2.0") != __version__:
+        raise StaleRun(f"rimbisect was updated from {state.get('version', '0.2.0')} to {__version__} since this "
+                       "run started")
     if state["game"] != setup.game.version:
-        raise UserError(f"the game was updated from {state['game']} to {setup.game.version} since this run "
-                        "started. Start a new one with `rimbisect bisect`.")
+        raise StaleRun(f"the game was updated from {state['game']} to {setup.game.version} since this run "
+                       "started")
     saved, order = state["mods"], setup.order
     if list(saved) != order.order:
-        raise UserError("the active mod list changed since this run started. Start a new one with `rimbisect bisect`.")
+        raise StaleRun("the active mod list changed since this run started")
     # Folder times from a copy or restore can shift by a second or two.
     updated = [pid for pid in order.order if folder_mtime(order.mods[pid].folder) > saved[pid] + 2]
     if updated:
@@ -143,13 +194,18 @@ def check_unchanged(state: dict, setup, log: Callable[[str], None]) -> None:
         log(f"warning: {setup.warnings[-1]}")
 
 
+def progress(run_dir: Path) -> str:
+    started = str(_read(run_dir).get("started", "?")).replace("T", " ")[:16]
+    return f"started {started}, {len(read_trials(run_dir / TRIALS_FILE))} trials done"
+
+
 def latest_unfinished(runs: Path) -> Path | None:
+    """The newest run, if it did not finish. A run that finished after it makes an older
+    unfinished one moot."""
     if not runs.is_dir():
         return None
     for run_dir in sorted((p for p in runs.iterdir() if (p / RUN_FILE).is_file()), reverse=True):
-        try:
-            if not json.loads((run_dir / RUN_FILE).read_text(encoding="utf-8")).get("finished"):
-                return run_dir
-        except (OSError, ValueError, AttributeError):
-            continue
+        state = _read(run_dir)
+        if state:
+            return None if state.get("finished") else run_dir
     return None

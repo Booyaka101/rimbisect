@@ -134,6 +134,9 @@ def prepare_savedata(real_config: Path, savedata: Path, save: Path | None = None
             shutil.copytree(real_config.parent / name, savedata / name, dirs_exist_ok=True)
     patch_prefs(config / "Prefs.xml", SAVE_PREFS if save else None)
     if save:
+        # Left by the "disable dev mode for good" button. The game then turns dev mode off
+        # before its UI exists, which throws and leaves it broken.
+        (config / "DevModeDisabled").unlink(missing_ok=True)
         (savedata / "Saves").mkdir(exist_ok=True)
         shutil.copyfile(save, savedata / "Saves" / AUTOSTART)
     return config
@@ -191,9 +194,10 @@ class Job:
         return cls(job)
 
     def close(self) -> None:
-        if self.handle:
-            _kernel32().CloseHandle(self.handle)
-            self.handle = None
+        # Also called from the console close handler's thread; only one of them may close it.
+        handle, self.handle = self.handle, None
+        if handle:
+            _kernel32().CloseHandle(handle)
 
 
 # taskkill /T also takes processes whose parent merely had the same id before it was
@@ -277,6 +281,15 @@ class GameLauncher:
         self.trials: list[Trial] = []
         self.numbered = 0
         self.not_loaded_at_first: set[str] | None = None
+        self.proc: subprocess.Popen | None = None
+        self.job: Job | None = None
+
+    def stop(self) -> None:
+        """End the game of the trial that is running, from another thread."""
+        if self.job is not None:
+            self.job.close()
+        elif self.proc is not None:
+            self.proc.kill()
 
     def run(self, mods: list[str], label: str, criterion: Criterion | None) -> Trial:
         self.numbered += 1
@@ -295,12 +308,15 @@ class GameLauncher:
             return trial
 
         env = dict(os.environ, RIMBISECT_EVENTS=str(events_path), RIMBISECT_SETTLE=str(self.settle))
+        if self.save:
+            env["RIMBISECT_SAVE"] = "1"
         args = [str(self.game.exe), f"-savedatafolder={self.savedata.as_posix()}",
                 *([] if self.save else ["-quicktest"]), "-logFile", str(log_path)]
         started = time.monotonic()
         proc = subprocess.Popen(args, cwd=str(self.game.root), env=env,
                                 stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         job = Job.holding(proc.pid)
+        self.proc, self.job = proc, job
         log_tail, events_tail = _Tail(log_path), _Tail(events_path)
         recent: list[str] = []
         done = log_done = loaded = False

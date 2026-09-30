@@ -20,6 +20,7 @@ namespace RimbisectProbe
         public static bool Active => !string.IsNullOrEmpty(EventsPath);
 
         public static readonly float Settle = ReadSettle();
+        private static readonly bool SaveMode = Environment.GetEnvironmentVariable("RIMBISECT_SAVE") == "1";
 
         private static float ReadSettle()
         {
@@ -33,6 +34,8 @@ namespace RimbisectProbe
         private static bool sawPlayScene;
         private static bool gaveUp;
         private static Timer watchdog;
+        internal static bool staticsDone;
+        private static int idleWatches;
 
         private static StreamWriter events;
         private static int messagesSeen;
@@ -84,6 +87,29 @@ namespace RimbisectProbe
         {
             KeepLogging();
             CheckErrorDialogs();
+            CheckStillAtMenu();
+        }
+
+        // The game only loads the save when it starts in dev mode; otherwise, or when a mod
+        // gets in the way, it sits at the main menu until the trial times out.
+        private static void CheckStillAtMenu()
+        {
+            if (!SaveMode || !staticsDone || sawPlayScene)
+            {
+                return;
+            }
+            try
+            {
+                idleWatches = LongEventHandler.AnyEventNowOrWaiting ? 0 : idleWatches + 1;
+            }
+            catch (Exception)
+            {
+                idleWatches = 0;
+            }
+            if (idleWatches >= 20)
+            {
+                GiveUp("the game stayed at the main menu instead of loading the save");
+            }
         }
 
         // After 10,000 messages RimWorld stops logging until someone clears the debug log, so
@@ -266,22 +292,25 @@ namespace RimbisectProbe
     {
         static ProbeLoaded()
         {
+            Probe.staticsDone = true;
             Probe.Emit("loaded", null, 1);
         }
     }
 
-    public class ProbeMapComponent : MapComponent
+    // A game component rather than a map component: a loaded save may have several maps, or
+    // be looking at the world, and map components only update for the map on screen.
+    public class ProbeGameComponent : GameComponent
     {
         private float readyAt = -1f;
         private int ticks;
         private bool done;
         private readonly HashSet<string> closed = new HashSet<string>();
 
-        public ProbeMapComponent(Map map) : base(map)
+        public ProbeGameComponent(Game game)
         {
         }
 
-        public override void MapComponentTick()
+        public override void GameComponentTick()
         {
             if (readyAt >= 0f)
             {
@@ -289,22 +318,26 @@ namespace RimbisectProbe
             }
         }
 
-        // Settle is game time, since that is what mods' tick errors need; a game too slow to
-        // get there still ends after three times as long in real time.
-        public override void MapComponentUpdate()
+        // Settle is game time, since that is what mods' tick errors need, but at least five
+        // seconds of real time for errors from drawing and updates. A game too slow to get
+        // there still ends after three times as long in real time.
+        public override void GameComponentUpdate()
         {
-            if (!Probe.Active || done)
+            // Also called at the main menu.
+            if (!Probe.Active || done || Current.ProgramState != ProgramState.Playing)
             {
                 return;
             }
+            float now = Time.realtimeSinceStartup;
             if (readyAt < 0f)
             {
-                readyAt = Time.realtimeSinceStartup;
+                readyAt = now;
                 Log.Message("RIMBISECT_MAP_READY");
                 Probe.Emit("map_ready", null, 1);
                 return;
             }
-            if (ticks < Probe.Settle * 60f && Time.realtimeSinceStartup - readyAt < Math.Max(60f, Probe.Settle * 3f))
+            bool settled = ticks >= Probe.Settle * 60f && now - readyAt >= 5f;
+            if (!settled && now - readyAt < Math.Max(60f, Probe.Settle * 3f))
             {
                 KeepPlaying();
                 return;

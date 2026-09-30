@@ -147,12 +147,14 @@ def test_timeout(launcher, monkeypatch, tmp_path):
 
 def test_a_save_is_loaded_instead_of_a_new_colony(launcher, monkeypatch, tmp_path):
     (tmp_path / "Config" / "Prefs.xml").write_text("<PrefsData><devMode>False</devMode></PrefsData>")
+    (tmp_path / "Config" / "DevModeDisabled").write_text("")
     launcher.save = tmp_path / "Colony.rws"
     launcher.save.write_text("the colony")
     trial = run(launcher, monkeypatch, "save", None)
     assert trial.outcome == PASS
-    assert trial.errors == [("loaded the colony, pauseOnLoad True", 1)]
+    assert trial.errors == [("loaded the colony, pauseOnLoad True, told 1", 1)]
     assert "<devMode>False</devMode>" in (tmp_path / "Config" / "Prefs.xml").read_text()
+    assert (tmp_path / "Config" / "DevModeDisabled").exists()
 
 
 def test_settings_a_mod_changed_are_put_back_for_the_next_trial(launcher, monkeypatch):

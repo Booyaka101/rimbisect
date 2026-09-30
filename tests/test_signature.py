@@ -16,6 +16,30 @@ def test_signature_uses_first_line_and_first_frame():
     assert signature_of(a) == signature_of(b) != signature_of(c)
 
 
+def test_the_first_frame_outside_the_framework_names_the_error():
+    head = "NullReferenceException: x\n  at System.Collections.Generic.Dictionary`2[TKey,TValue].FindEntry (TKey key)\n"
+    a = head + "  at Foo.Bar () [0x00012]"
+    b = head + "  at Other.Caller () [0x00012]"
+    assert signature_of(a) != signature_of(b)
+    assert signature_of(a).endswith("| Foo.Bar")
+    only = "NullReferenceException: x\n  at UnityEngine.Object.get_name ()\n  at System.String.Concat ()"
+    assert signature_of(only).endswith("| Object.get_name")
+
+
+def test_a_duplicate_stack_trace_joins_the_error_it_repeats():
+    original = ("Ironhead threw exception in WorkGiver HaulCorpses: System.NullReferenceException: Object reference\n"
+                "[Ref 58FDB5E6]\n  at Verse.AI.PathGrid.Cost (Verse.IntVec3 loc) [0x00017] in <61e4>:0\n")
+    duplicate = ("Ironhead threw exception in WorkGiver HaulGeneral: System.NullReferenceException: Object reference\n"
+                 "[Ref 58FDB5E6] Duplicate stacktrace, see ref for original")
+    groups = group_errors([(original, 1), (duplicate, 3)])
+    assert [(g.signature, g.count) for g in groups] == [(signature_of(original), 4)]
+
+
+def test_exceptions_come_before_errors_logged_more_often():
+    groups = group_errors([("Could not find a def", 50), ("NullReferenceException: x\n  at Foo.Bar ()", 1)])
+    assert [g.count for g in groups] == [1, 50]
+
+
 def test_a_harmony_patch_does_not_change_the_signature():
     head = "Exception ticking Pawn: System.NullReferenceException: Object reference not set\n"
     plain = head + "  at Verse.Pawn.Tick () [0x0001c] in <c5b2f7a8>:0\n  at Verse.TickList.Tick ()"

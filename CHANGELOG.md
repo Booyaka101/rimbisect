@@ -1,5 +1,50 @@
 # Changelog
 
+## 0.2.1 - 2026-09-30
+
+A review pass over 0.2.0. Runs started by 0.2.0 can't be resumed with 0.2.1.
+
+Search:
+
+- An error that shows up only some of the time could send the search down the wrong
+  half and blame mods that never fail. The full list runs again once the search
+  narrows, and a pass there stops the run as inconclusive instead of 190 trials later.
+- A group of mods is cut down to the ones it needs, so a mod kept in by a lucky pass
+  isn't named.
+- When every trial either failed or crashed, the check that the game fails without any
+  mods was skipped and the search named a string of innocent mods. Crashes no longer
+  count as a pass for that.
+
+Save mode:
+
+- A save no longer fails to load when dev mode was turned off for good in the game's
+  options.
+- When the game stays at the main menu instead of loading the save, the trial ends after
+  about ten seconds as a crash instead of waiting out the timeout.
+- Game time is counted for the whole game, not the current map, so a save that opens on
+  the world view or has several maps settles too. Settle is at least five real seconds.
+
+Errors:
+
+- Signatures take the first stack frame outside .NET and Unity, so unrelated errors
+  failing in the same dictionary lookup stay apart.
+- RimWorld's "Duplicate stacktrace" lines join the error they repeat.
+- The errors list in the report is numbered like the one `--pick` uses.
+
+Runs:
+
+- `resume` takes `--repeats`, `--timeout`, `--pick` and `--json`, and resuming an
+  inconclusive run with `--repeats` or `--timeout` tries again from where it stopped.
+- `resume` refuses a run started by another rimbisect version, and a save run whose save
+  copy is gone.
+- Closing the console window stops the game and removes the probe from `Mods`.
+- A second rimbisect on the same game is refused.
+- A run that was killed mid-write no longer leaves a broken `run.json` or trial line.
+- The save copy is deleted when a run finishes, except an inconclusive one.
+- Guided mode asks for the RimWorld folder when it can't find it, strips the quotes from
+  a dragged path, shows how far an unfinished run got, and starts a new run when the old
+  one can't go on.
+
 ## 0.2.0 - 2026-09-30
 
 - `rimbisect.exe`, a single file on the release page that needs no Python. Double-click

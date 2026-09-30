@@ -14,6 +14,10 @@ _EXCEPTION = re.compile(r"\b(?:[A-Za-z_]\w*\.)+\w*Exception\b")
 _GENERIC = re.compile(r"\[[^\]]*\]")
 _DMD = re.compile(r"DMD<.*::([^>]+)>+")
 _HARMONY = re.compile(r"^MonoMod\.Utils\.DynamicMethodDefinition\.|_Patch\d+$")
+# Framework frames are shared by unrelated errors, a dictionary lookup failing for one.
+_FRAMEWORK = ("System.", "UnityEngine.", "Mono.")
+# RimWorld logs a stack trace it has logged before as a reference to the first one.
+_REF = re.compile(r"^\[Ref ([0-9A-F]+)\]( Duplicate stacktrace)?", re.M)
 
 
 def normalize(line: str) -> str:
@@ -36,7 +40,8 @@ def _method(frame: re.Match) -> str:
 
 
 def signature_of(text: str) -> str:
-    """First line of the error plus the method of its first stack frame, normalized.
+    """First line of the error plus the method of its first stack frame outside the
+    framework, normalized.
 
     The frame keeps two NullReferenceExceptions from different methods apart; the rest of
     the trace varies with load order and is left out. With a stack trace, an exception type
@@ -46,7 +51,8 @@ def signature_of(text: str) -> str:
     lines = [line for line in text.splitlines() if line.strip()]
     if not lines:
         return ""
-    frame = next((m for m in map(_FRAME.match, lines[1:]) if m), None)
+    frames = [m for m in map(_FRAME.match, lines[1:]) if m]
+    frame = next((m for m in frames if not m.group(1).startswith(_FRAMEWORK)), frames[0] if frames else None)
     if not frame:
         return normalize(lines[0])
     exception = _EXCEPTION.search(lines[0])
@@ -65,15 +71,22 @@ class ErrorGroup:
 
 
 def group_errors(errors: list[tuple[str, int]]) -> list[ErrorGroup]:
-    """(text, repeats) pairs grouped by signature, most frequent first, ties in log order."""
+    """(text, repeats) pairs grouped by signature, exceptions first, then most frequent
+    first, ties in log order. Exceptions are rare next to missing-def errors, which some
+    mod lists log thousands of."""
     groups: dict[str, ErrorGroup] = {}
+    refs: dict[str, str] = {}
     for text, repeats in errors:
-        sig = signature_of(text)
+        ref = _REF.search(text)
+        sig = refs.get(ref.group(1), "") if ref and ref.group(2) else ""
+        sig = sig or signature_of(text)
+        if ref and not ref.group(2):
+            refs[ref.group(1)] = sig
         if not sig:
             continue
         group = groups.setdefault(sig, ErrorGroup(sig, text))
         group.count += repeats
-    return sorted(groups.values(), key=lambda g: -g.count)
+    return sorted(groups.values(), key=lambda g: ("Exception" not in g.example, -g.count))
 
 
 @dataclass

@@ -23,7 +23,10 @@ from collections.abc import Callable, Iterable
 
 from .modlist import LoadOrder
 from .signature import Criterion
-from .trial import CRASH, FAIL, UNRESOLVED, Launcher, Trial
+from .trial import CRASH, FAIL, PASS, UNRESOLVED, Launcher, Trial
+
+
+CRASHED_AGAIN = "crashed, again"
 
 
 class _Unconfirmed(Exception):
@@ -54,7 +57,7 @@ def run_answered(launcher: Launcher, mods: list[str], label: str, criterion: Cri
         if trial.outcome == UNRESOLVED:
             label = "no answer, again"
         elif trial.outcome == CRASH and not crash_is_fail and outcomes.count(CRASH) == 1:
-            label = "crashed, again"
+            label = CRASHED_AGAIN
         else:
             return trial
         log(trial.line())
@@ -80,6 +83,7 @@ class Search:
         self.flaky: list[dict] = []
         self.saw_pass = False
         self.base_fails = False
+        self.baseline: set[str] = set()
         self.groups: list[set[str]] = []
         # Mods taken out of the search, which no trial may load as an alternative dependency.
         self.excluded: set[str] = set()
@@ -92,9 +96,19 @@ class Search:
 
     def record(self, ids: Iterable[str], failed: bool) -> None:
         """Seed the cache with a result obtained elsewhere (the baseline)."""
+        self.baseline = set(ids)
         self.cache[self._key(ids)] = failed
         self.seeded.add(self._key(ids))
         self.saw_pass |= not failed
+
+    def _unseed(self, ids: Iterable[str]) -> bool:
+        """Forget a seeded result so the next fails() runs a trial; whether it was seeded."""
+        key = self._key(ids)
+        if key not in self.seeded:
+            return False
+        del self.cache[key]
+        self.seeded.discard(key)
+        return True
 
     def known(self, ids: Iterable[str]) -> bool | None:
         return self.cache.get(self._key(ids))
@@ -118,7 +132,8 @@ class Search:
                                "outcomes": [t.outcome for t in runs]})
             self.log(f"           flaky: the same {runs[0].mod_count} mods passed and then failed")
         self.cache[key] = failed
-        self.saw_pass |= not failed
+        # A crash says nothing about whether the error would have shown.
+        self.saw_pass |= any(t.outcome == PASS for t in runs)
         return failed
 
     def _run(self, mods: list[str], label: str) -> Trial:
@@ -152,9 +167,29 @@ class Search:
             return self.find(second, fixed)
         if not verified:
             raise _Unconfirmed
+        if fixed:
+            self._recheck_baseline()
         needed_second = self.find(second, fixed | set(first))
         needed_first = self.find(first, fixed | needed_second)
         return needed_first | needed_second
+
+    def _recheck_baseline(self) -> None:
+        """Three or more mods needed together is rare, and it is also what a baseline failure
+        that does not repeat looks like, which would go on for many trials. Once per search,
+        see that the full list still fails."""
+        if self._unseed(self.baseline) and not self.fails(self.baseline, "full list again"):
+            raise Inconclusive("the error did not show again with the full list",
+                               "It may not show up every time; --repeats 3 runs each passing list "
+                               "up to three times")
+
+    def _minimal(self, found: set[str]) -> set[str]:
+        """found without the mods the error turns out not to need, which a pass that should
+        have been a failure leaves in."""
+        for pid in [p for p in self.order.order if p in found]:
+            rest = found - {pid}
+            if rest and self._key(rest) != self._key(found) and self.fails(rest, "without one culprit"):
+                found = rest
+        return found
 
     def _through_dependencies(self, pid: str, fixed: set[str]) -> set[str]:
         """A culprit that only failed together with the dependencies it pulled in may be
@@ -192,10 +227,10 @@ class Search:
             found = self.find(candidates) if candidates else set()
         if not self.saw_pass and self.fails(set(), "base game only"):
             return set()
-        if found and self._key(found) in self.seeded:
-            # Every mod is needed, which rests on the baseline alone; see that it fails again.
-            del self.cache[self._key(found)]
-            self.seeded.discard(self._key(found))
+        if len(found) > 1:
+            found = self._minimal(found)
+        # Every mod is needed, which rests on the baseline alone; see that it fails again.
+        self._unseed(found)
         if found and not self.fails(found, "culprits alone"):
             names = self.order.written([pid for pid in self.order.order if pid in found])
             raise Inconclusive(f"the mods the search narrowed down to ({', '.join(names[:5])}"
