@@ -134,7 +134,7 @@ def test_exit_without_done_is_a_crash(launcher, monkeypatch):
     trial = run(launcher, monkeypatch, "exit")
     assert trial.outcome == CRASH
     assert trial.excerpt.splitlines()[0] == "the game exited early with code 1"
-    assert "Crash!!!" in trial.excerpt
+    assert trial.excerpt.splitlines()[-2:] == ["Crash!!!", "	Managed Stacktrace:"]
 
 
 def test_timeout(launcher, monkeypatch, tmp_path):
@@ -143,6 +143,16 @@ def test_timeout(launcher, monkeypatch, tmp_path):
     assert trial.outcome == UNRESOLVED
     assert "no result after 1s" in trial.excerpt
     assert not still_running(tmp_path / "pid")
+
+
+def test_a_save_is_loaded_instead_of_a_new_colony(launcher, monkeypatch, tmp_path):
+    (tmp_path / "Config" / "Prefs.xml").write_text("<PrefsData><devMode>False</devMode></PrefsData>")
+    launcher.save = tmp_path / "Colony.rws"
+    launcher.save.write_text("the colony")
+    trial = run(launcher, monkeypatch, "save", None)
+    assert trial.outcome == PASS
+    assert trial.errors == [("loaded the colony, pauseOnLoad True", 1)]
+    assert "<devMode>False</devMode>" in (tmp_path / "Config" / "Prefs.xml").read_text()
 
 
 def test_settings_a_mod_changed_are_put_back_for_the_next_trial(launcher, monkeypatch):

@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "rimbisect"
-version = "0.1.0"
+version = "0.2.0"
 description = "Find the RimWorld mod, or combination of mods, behind an error by relaunching the game on halves of your load order."
 readme = "README.md"
 license = { text = "MIT" }

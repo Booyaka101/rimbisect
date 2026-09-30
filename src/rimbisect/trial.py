@@ -36,6 +36,10 @@ PREF_OVERRIDES = {
     "uiScale": "1",
 }
 
+# At launch the game loads the save named "autostart", but only in dev mode.
+SAVE_PREFS = {"devMode": "True", "pauseOnLoad": "False"}
+AUTOSTART = "autostart.rws"
+
 # Mod settings that live next to Config rather than in it.
 SETTINGS_FOLDERS = ("HugsLib",)
 
@@ -66,6 +70,10 @@ class Trial:
 
 
 class Launcher(Protocol):
+    trials: list[Trial]
+    numbered: int  # trial numbers used so far
+    not_loaded_at_first: set[str] | None
+
     def run(self, mods: list[str], label: str, criterion: Criterion | None) -> Trial: ...
 
 
@@ -87,8 +95,8 @@ def remove_probe(game: Game) -> None:
     shutil.rmtree(game.mods_dir / PROBE_FOLDER, ignore_errors=True)
 
 
-def patch_prefs(path: Path) -> None:
-    """Apply PREF_OVERRIDES to a copied Prefs.xml, adding the elements if missing."""
+def patch_prefs(path: Path, extra: dict[str, str] | None = None) -> None:
+    """Apply PREF_OVERRIDES and extra to a copied Prefs.xml, adding the elements if missing."""
     from lxml import etree
 
     root = None
@@ -101,7 +109,7 @@ def patch_prefs(path: Path) -> None:
     if root is None:
         root = etree.Element("PrefsData")
         tree = etree.ElementTree(root)
-    for tag, value in PREF_OVERRIDES.items():
+    for tag, value in {**PREF_OVERRIDES, **(extra or {})}.items():
         el = root.find(tag)
         if el is None:
             el = etree.SubElement(root, tag)
@@ -109,10 +117,10 @@ def patch_prefs(path: Path) -> None:
     tree.write(str(path), xml_declaration=True, encoding="utf-8")
 
 
-def prepare_savedata(real_config: Path, savedata: Path) -> Path:
+def prepare_savedata(real_config: Path, savedata: Path, save: Path | None = None) -> Path:
     """savedata/Config with every file from the real Config folder except ModsConfig.xml,
     plus the SETTINGS_FOLDERS beside it. Done before every trial, so nothing a mod writes
-    during one trial carries over into the next."""
+    during one trial carries over into the next. With a save, it is the one the game loads."""
     config = savedata / "Config"
     for name in ("Config", *SETTINGS_FOLDERS):
         shutil.rmtree(savedata / name, ignore_errors=True)
@@ -124,7 +132,10 @@ def prepare_savedata(real_config: Path, savedata: Path) -> Path:
     for name in SETTINGS_FOLDERS:
         if (real_config.parent / name).is_dir():
             shutil.copytree(real_config.parent / name, savedata / name, dirs_exist_ok=True)
-    patch_prefs(config / "Prefs.xml")
+    patch_prefs(config / "Prefs.xml", SAVE_PREFS if save else None)
+    if save:
+        (savedata / "Saves").mkdir(exist_ok=True)
+        shutil.copyfile(save, savedata / "Saves" / AUTOSTART)
     return config
 
 
@@ -248,10 +259,11 @@ class _Tail:
 
 
 class GameLauncher:
-    """Launches RimWorld with -quicktest on an isolated save data folder."""
+    """Launches RimWorld on an isolated save data folder, into a new -quicktest colony or a save."""
 
     def __init__(self, game: Game, config: ModsConfig, run_dir: Path, real_config_dir: Path,
-                 settle: float = 20.0, timeout: float = 1200.0, poll: float = 0.25, log=print):
+                 settle: float = 20.0, timeout: float = 1200.0, poll: float = 0.25, log=print,
+                 save: Path | None = None):
         self.game = game
         self.config = replace(config, version=game.version)
         self.run_dir = run_dir
@@ -261,11 +273,14 @@ class GameLauncher:
         self.timeout = timeout
         self.poll = poll
         self.log = log
+        self.save = save
         self.trials: list[Trial] = []
+        self.numbered = 0
         self.not_loaded_at_first: set[str] | None = None
 
     def run(self, mods: list[str], label: str, criterion: Criterion | None) -> Trial:
-        trial = Trial(len(self.trials) + 1, label, mods)
+        self.numbered += 1
+        trial = Trial(self.numbered, label, mods)
         self.trials.append(trial)
         stem = self.run_dir / f"trial-{trial.number:02d}"
         log_path, events_path = stem.with_suffix(".log").resolve(), stem.with_suffix(".events.jsonl").resolve()
@@ -273,15 +288,15 @@ class GameLauncher:
             path.unlink(missing_ok=True)
         trial.log = str(log_path)
         try:
-            prepare_savedata(self.real_config_dir, self.savedata)
+            prepare_savedata(self.real_config_dir, self.savedata, self.save)
             (self.savedata / "Config" / "ModsConfig.xml").write_text(self.config.to_xml(mods), encoding="utf-8")
         except OSError as exc:
             trial.excerpt = f"could not refresh the copied Config folder: {exc}"
             return trial
 
         env = dict(os.environ, RIMBISECT_EVENTS=str(events_path), RIMBISECT_SETTLE=str(self.settle))
-        args = [str(self.game.exe), f"-savedatafolder={self.savedata.as_posix()}", "-quicktest",
-                "-logFile", str(log_path)]
+        args = [str(self.game.exe), f"-savedatafolder={self.savedata.as_posix()}",
+                *([] if self.save else ["-quicktest"]), "-logFile", str(log_path)]
         started = time.monotonic()
         proc = subprocess.Popen(args, cwd=str(self.game.root), env=env,
                                 stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
@@ -298,7 +313,8 @@ class GameLauncher:
                 if log_done or line == DONE_LINE:
                     log_done = True
                     return
-                recent = (recent + [line])[-40:]
+                if line.strip("= \t"):  # Mono's crash banner is mostly rules and blank lines.
+                    recent = (recent + [line])[-40:]
                 if line.startswith(PROBE_LINE):
                     continue
                 if line.startswith(FALLBACK_LINES) and gave_up is None:

@@ -1,8 +1,9 @@
 # rimbisect progress
 
-State on 2026-09-30: version 0.1.0 is released. https://github.com/Booyaka101/rimbisect
-(tag `v0.1.0`, CI green on Python 3.11 to 3.13 on Windows) and
-https://pypi.org/project/rimbisect/0.1.0/, which installs into a fresh venv and runs.
+State on 2026-09-30: version 0.2.0 adds `resume`, `--save`, a standalone
+`rimbisect.exe`, error search by text and a faster settle. 0.1.0 is released at
+https://github.com/Booyaka101/rimbisect (tag `v0.1.0`) and
+https://pypi.org/project/rimbisect/0.1.0/.
 
 ## Verified
 
@@ -24,6 +25,32 @@ All on the owner's PC: RimWorld 1.6.4871 (Steam, `D:\SteamLibrary`), i9-14900K, 
   both pausing windows after the change to count only windows it actually removed. The
   output is in README.md. The run before the last review round (2026-09-30_11-53-13)
   took the same 12 trials in 11m47s.
+- **A real bug, with resume.** The 200 mod list minus the test mod logs
+  `encountered ArgumentException while patching PawnCanOpen` at startup. Hunted with
+  `--match-text "while patching PawnCanOpen"` (run 2026-09-30_14-27-18). After trial 4
+  the process was killed by PID, which took the game with it through the job object;
+  `rimbisect resume` from the exe then replayed the four recorded trials without starting
+  the game and went on live from trial 5. Exit 0 after 23 trials in 33m34s: Doors
+  Expanded and Pawnmorpher, which only fail together. The confirm trial with the other
+  197 mods passed. One trial crashed natively (0xC0000005) and passed when run again.
+- **Mods write into their own folders.** During that run VanillaExpanded.Achievements
+  (`AchievementLog.txt`), neronix17.tweaksgalore (`Version.txt`) and
+  SmashPhil.VehicleFramework (`Updates/UpdateLog.xml`) wrote files into their mod
+  folders at game start. The first `resume` refused the run because of it; newer files
+  are now a warning, and a changed mod list or game version still refuse. The same
+  writes make "changed since the last good run" include those mods, which only costs a
+  trial or two since it only orders the search.
+- **Save mode.** A test mod `rimbisect.acceptance.savefail` logs an error from
+  `GameComponent.LoadedGame`, which only runs for a loaded save. In a 16 mod list with
+  `--save Autosave-1 --match-text "only happens in a loaded save" --settle 5` (run
+  2026-09-30_15-07-13): exit 0, found in 8 trials, 1m53s. The save was made with 8 mods
+  on 1.6.4850 and loaded with its missing-class errors each time. Passing trials ran
+  their 300 ticks within a second or two of the map being ready. `check` on the same list
+  without `--save` passed, and the original save's timestamp is unchanged.
+- **Standalone exe.** PyInstaller onefile, 13.8 MB, built from a clean venv (the global
+  environment left the probe out and pulled in unrelated packages). It ran `mods` and the
+  resume above against the real install. Started in its own console it waits in guided
+  mode; started from `cmd` with no arguments it prints usage and exits 2.
 - **Paused maps.** The run before that one (2026-09-30_11-29-17, same result, 14m16s)
   had 0 game ticks in trials 2 and 12: HugsLib's update news and Brrainz's feature
   dialog (Achtung, Camera+) paused the new game, so those trials only "passed" by the
@@ -59,7 +86,7 @@ All on the owner's PC: RimWorld 1.6.4871 (Steam, `D:\SteamLibrary`), i9-14900K, 
   RimWorld process was left. The probe folder was left in `Mods`, as the README says.
 - After every finished run the probe folder was gone from `<game>\Mods` and no RimWorld
   process was left. The real `ModsConfig.xml` and `Prefs.xml` were never written.
-- `python -m pytest`: 183 passed. `python -m pyflakes src tests acceptance/*.py` clean.
+- `python -m pytest`: 193 passed. `python -m pyflakes src tests acceptance/*.py` clean.
 - `python -m build` makes the wheel and sdist. The wheel's `RimbisectProbe.dll` matches
   `src/` by hash, installs into a fresh venv, and `rimbisect --version` and `mods` run
   from it.
@@ -138,11 +165,11 @@ dialog is already open, and that dialog's title was translated on the main threa
 - The game falling back to Core alone after a load error (its log lines and the
   "RecoveredFromErrors" dialog) was tested with the fake game only.
 - The pawn-name signature change was tested with made-up log lines, not a live error.
-- Pairs of mods that only fail together were tested with the fake game and the simulator
-  only, not with two real test mods.
+- Guided mode (double-click) was tested live only up to its first question; the rest is
+  covered by tests with a faked console.
+- The exe on another PC, and what SmartScreen does with it.
+- `--save` with a save made on the same big list it is bisecting.
 - The 400 mod timing in the README is an estimate from the 200 mod run.
-- The crash retry was tested with the fake game; the native crash it is for was seen
-  live once but not during a bisect.
 - If the probe fails to write one event, it drops its writer and opens a new one on the
   next event without disposing the old stream. Harmless for a process that exits soon.
 - Non-Steam installs, other RimWorld versions than 1.6.4871, Windows 10.
@@ -154,16 +181,18 @@ dialog is already open, and that dialog's title was translated on the main threa
    `python -m build`, `twine upload dist/*`, tag and `gh release create`.
 
 To run the acceptance again: `python acceptance/stage.py install --size 200 --position 150`
-(or `--mod mapfail`, `--mod flood`) installs the test mod and writes the list to
+(or `--mod mapfail`, `--mod flood`, `--mod savefail`) installs the test mod and writes the list to
 `acceptance/work`, and `python acceptance/stage.py remove` removes the test mods. The
 game's own mod list has only 8 mods now, so add `--source acceptance/work/ModsConfig-200.xml`
 to reuse the saved 200 mod list. The
-test mod sources are in `acceptance/brokendef`, `acceptance/mapfail-src` and
-`acceptance/flood-src`, the probe's in `probe-src` (`dotnet build -c Release` writes the
+test mod sources are in `acceptance/brokendef`, `acceptance/mapfail-src`,
+`acceptance/flood-src` and `acceptance/savefail-src`, the probe's in `probe-src` (`dotnet build -c Release` writes the
 DLL straight to `src/rimbisect/probe/Assemblies`). `acceptance/simulate.py` measures
 trial counts against a simulated game.
 
 ## First distribution step
+
+Draft updated for 0.2.0 below the 0.1.0 one. Not posted.
 
 A reply in the next r/RimWorld "PC Help/Bug (Mod)" thread about an error at startup,
 where someone is being told to halve their mod list by hand. These come up every few days
@@ -191,7 +220,31 @@ or on a fresh map, since that is all rimbisect can reproduce:
 Least sure of: "I made" (it was built with Claude; say so if anyone asks), and whether
 the 12 minute figure oversells it for someone on a slower PC with 400 mods.
 
+0.2.0 draft. With the exe and `--save` it now fits threads about errors in an existing
+colony too:
+
+> If you don't want to halve your list by hand, I made a tool that does it for you:
+> https://github.com/Booyaka101/rimbisect
+>
+> There's an exe on the releases page, no Python needed. Double click it, pick the red
+> error from the list it shows, and it keeps restarting the game on smaller parts of your
+> list until it's down to the mod, or the two mods that only break together. It keeps
+> dependencies loaded and runs on a copy of your config, so your mod list and saves
+> aren't touched. If the error only happens in your colony you can give it a save and
+> every run loads a copy of that.
+>
+> On my 200 mod list it found a Doors Expanded + Pawnmorpher patch conflict on its own,
+> took about half an hour. Windows only, and the exe isn't signed so SmartScreen will
+> probably moan the first time.
+
+Least sure of: the Doors Expanded + Pawnmorpher line. It is a real find on this list,
+but on today's versions only; check it still happens before naming two mods in public,
+or drop the names. Same "I made" caveat as above.
+
 ## Missing features
+
+Built for 0.2.0: `resume`, `--save`, the exe with a guided double-click mode, exceptions
+first and search by text when picking the error, Superfast settle.
 
 Built in the review passes: the copied Config folder is deleted when a run ends; the
 report notes message-limit hits, slow trials, closed windows and mods the game did not
@@ -201,12 +254,11 @@ the report.
 
 Not built:
 
-- Resume an interrupted bisect from its run folder. The trial results are all in
-  `report.json`, so the search could replay them.
 - `--suspects ID,...` to search only some mods (the inverse of `--keep`).
 - A notification when a long run finishes.
 - Load order problems: rimbisect never reorders, so an order-only bug comes out as a set.
-- Errors that need a save or play time. Would need save loading, out of scope for v1.
+- Errors that need play time, a raid or an event. `--save` covers errors that come
+  from the save itself.
 - Linux and macOS, GOG and other non-Steam installs (`--game` may work, untested).
 - Writing the fixed list into the game's config. Left out on purpose: rimbisect never
   writes the real config.

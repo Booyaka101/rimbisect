@@ -77,7 +77,7 @@ def build(*, status: str, run_dir: Path, game, config_path: Path, order: LoadOrd
           causes: list[set[str]] | None = None, base_fails: bool = False, flaky: list[dict] | None = None,
           changed: list[str] | None = None, changed_since: str | None = None,
           errors: list[ErrorGroup] | None = None, crash_is_fail: bool = False, settle: float | None = None,
-          warnings: list[str]) -> dict:
+          save: str | None = None, warnings: list[str]) -> dict:
     causes = [[pid for pid in order.order if pid in group] for group in causes or []]
     ordered = [pid for group in causes for pid in group]
     removed = [pid for pid in order.order if pid in ordered] + order.dependents(ordered)
@@ -134,6 +134,7 @@ def build(*, status: str, run_dir: Path, game, config_path: Path, order: LoadOrd
         "modsConfig": str(config_path),
         "activeMods": len(order.order),
         "searchedMods": searched,
+        "save": save,
         "criterion": criterion.describe() if criterion else None,
         "changedMods": [order.spelling.get(p, p) for p in changed] if changed else None,
         "changedSince": changed_since if changed else None,
@@ -170,6 +171,8 @@ def render_text(report: dict) -> str:
                 "slower_than": f"map not ready within {criterion['value']}s",
                 "crash": "the game crashes"}[criterion["kind"]]
         out.append(f"error       {what.splitlines()[0] if what else ''}")
+    if report["save"]:
+        out.append(f"save        {report['save']}")
     if report["changedMods"]:
         out.append(f"changed     {_count(len(report['changedMods']), 'mod')} {report['changedSince']}")
     out.append(f"run folder  {report['run']}")

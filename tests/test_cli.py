@@ -1,3 +1,4 @@
+import argparse
 import json
 import os
 import time
@@ -9,7 +10,7 @@ from fakegame import FakeGame, write_mod
 from rimbisect import cli
 from rimbisect.install import Game
 from rimbisect.modlist import PROBE_FOLDER
-from rimbisect.trial import CRASH, UNRESOLVED
+from rimbisect.trial import CRASH, UNRESOLVED, Trial
 
 
 @pytest.fixture
@@ -34,6 +35,8 @@ def env(tmp_path, monkeypatch):
     state = {"rule": lambda mods: "m11" in mods, "running": set(), "probe_seen": []}
 
     def launcher(game, config, run_dir, real_config_dir, **kwargs):
+        state["save"] = kwargs.get("save")
+
         def rule(mods):
             state["probe_seen"].append((game.mods_dir / PROBE_FOLDER / "About" / "About.xml").is_file())
             return state["rule"](mods)
@@ -361,3 +364,158 @@ def test_closed_stdin_on_a_terminal_asks_for_pick(env, capsys, monkeypatch):
     monkeypatch.setattr("builtins.input", lambda prompt: (_ for _ in ()).throw(EOFError))
     assert cli.main(["bisect", *env["args"]]) == 2
     assert "--pick N" in capsys.readouterr().err
+
+
+def _interrupt_after(count, rule):
+    live = {"n": 0}
+
+    def run(mods):
+        live["n"] += 1
+        if live["n"] > count:
+            raise KeyboardInterrupt
+        return rule(mods)
+    return run, live
+
+
+def test_resume_goes_on_without_running_the_finished_trials_again(env, capsys):
+    rule = env["rule"]
+    assert cli.main(["bisect", *env["args"], "--match", "cross-reference"]) == 0
+    whole, _ = reports(env)
+    env["rule"], live = _interrupt_after(3, rule)
+    assert cli.main(["bisect", *env["args"], "--match", "cross-reference"]) == 130
+    assert "rimbisect resume" in capsys.readouterr().err
+    stopped, run = reports(env)
+    env["rule"], live = _interrupt_after(99, rule)
+    assert cli.main(["resume", "--workdir", str(env["work"])]) == 0
+    assert "3 trials of this run are recorded" in capsys.readouterr().err
+    data, resumed = reports(env)
+    assert resumed == run and data["status"] == "found"
+    assert [c["packageId"] for c in data["culprits"]] == ["m11"]
+    assert live["n"] == len(whole["trials"]) - 3
+    assert [t["number"] for t in data["trials"]] == list(range(1, len(whole["trials"]) + 1))
+    assert cli.main(["resume", "--workdir", str(env["work"])]) == 2
+    assert "no unfinished run" in capsys.readouterr().err
+    assert cli.main(["resume", str(run)]) == 2
+    assert "is finished" in capsys.readouterr().err
+
+
+def test_resume_keeps_the_picked_error(env, capsys, monkeypatch):
+    monkeypatch.setattr("sys.stdin.isatty", lambda: True)
+    monkeypatch.setattr("builtins.input", lambda prompt: "1")
+    env["rule"], _ = _interrupt_after(2, env["rule"])
+    assert cli.main(["bisect", *env["args"]]) == 130
+    env["rule"] = lambda mods: "m11" in mods
+    monkeypatch.setattr("sys.stdin.isatty", lambda: False)
+    assert cli.main(["resume", "--workdir", str(env["work"])]) == 0
+    data, _ = reports(env)
+    assert data["criterion"]["kind"] == "signature" and data["trials"][0]["outcome"] == "FAIL"
+
+
+def test_resume_runs_trials_without_an_answer_again(env, capsys):
+    env["rule"] = lambda mods: UNRESOLVED if "m05" in mods and len(mods) < 12 else "m11" in mods
+    assert cli.main(["bisect", *env["args"], "--match", "cross-reference"]) == 1
+    env["rule"] = lambda mods: "m11" in mods
+    assert cli.main(["resume", "--workdir", str(env["work"])]) == 0
+    data, _ = reports(env)
+    assert [c["packageId"] for c in data["culprits"]] == ["m11"]
+    numbers = [t["number"] for t in data["trials"]]
+    assert numbers == sorted(set(numbers))
+
+
+def test_resume_warns_about_newer_files_and_refuses_another_mod_list(env, capsys):
+    rule = env["rule"]
+    env["rule"], _ = _interrupt_after(2, rule)
+    assert cli.main(["bisect", *env["args"], "--match", "cross-reference"]) == 130
+    later = time.time() + 60
+    os.utime(env["root"] / "Mods" / "m04", (later, later))
+    env["rule"] = rule
+    assert cli.main(["resume", "--workdir", str(env["work"])]) == 0
+    assert "1 mods have files newer than the start of this run (m04)" in reports(env)[0]["warnings"][0]
+    env["rule"], _ = _interrupt_after(2, rule)
+    assert cli.main(["bisect", *env["args"], "--match", "cross-reference"]) == 130
+    config = env["work"].parent / "Config" / "ModsConfig.xml"
+    config.write_text(config.read_text().replace("<li>m03</li>", ""))
+    assert cli.main(["resume", "--workdir", str(env["work"])]) == 2
+    assert "the active mod list changed" in capsys.readouterr().err
+
+
+def test_pick_lists_exceptions_first_and_finds_errors_by_text(capsys, monkeypatch):
+    names = [a + b for a in "ABCD" for b in "abcdefghij"]
+    errors = [(f"Could not load reference to Verse.ThingDef named TM_{name}", 50 - i) for i, name in enumerate(names)]
+    errors.append(("encountered ArgumentException while patching PawnCanOpen\n"
+                   "  at HarmonyLib.PatchClassProcessor.Patch ()", 1))
+    answers = iter(["Could not load", "nothing like it", "TM_Dh", "1"])
+    monkeypatch.setattr("sys.stdin.isatty", lambda: True)
+    monkeypatch.setattr("builtins.input", lambda prompt: next(answers))
+    args = argparse.Namespace(crash_is_fail=False, pick=None)
+    baseline = Trial(1, "baseline", [], errors=errors)
+    criterion = cli._hunted(baseline, None, args)
+    err = capsys.readouterr().err
+    assert "     1.     1x  encountered ArgumentException" in err
+    assert "40 errors contain that" in err and "no error contains that" in err
+    assert criterion.label == "Could not load reference to Verse.ThingDef named TM_Dh" and args.pick == 39
+    assert baseline.outcome == "FAIL"
+
+
+def test_save_is_found_by_name_and_copied_into_the_run(env, capsys):
+    saves = env["work"].parent / "Saves"
+    saves.mkdir()
+    (saves / "Tribe of Estian.rws").write_text("the tribe")
+    assert cli.main(["bisect", *env["args"], "--match", "cross-reference", "--save", "Tribe"]) == 2
+    err = capsys.readouterr().err
+    assert "--save Tribe: no such save. The newest in" in err and err.rstrip().endswith(": Tribe of Estian")
+    assert not (env["work"] / "runs").exists()
+    assert cli.main(["bisect", *env["args"], "--match", "cross-reference", "--save", "Tribe of Estian"]) == 0
+    data, run = reports(env)
+    assert data["save"] == str(saves / "Tribe of Estian.rws")
+    assert env["save"] == run / "save.rws" and env["save"].read_text() == "the tribe"
+    assert f"save        {saves}" in capsys.readouterr().out
+
+
+@pytest.fixture
+def clicked(env, tmp_path, monkeypatch):
+    """The exe double-clicked: no arguments, defaults for everything, answers from the list."""
+    found = cli.find_game
+    monkeypatch.setattr(cli, "find_game", lambda path: found(path or env["root"]))
+    monkeypatch.setattr(cli, "_double_clicked", lambda: True)
+    monkeypatch.setattr("sys.argv", ["rimbisect.exe"])
+    monkeypatch.setattr("sys.stdin.isatty", lambda: True)
+    monkeypatch.setenv("LOCALAPPDATA", str(tmp_path))
+    env["work"] = tmp_path / "rimbisect"
+    env["answers"] = []
+    env["prompts"] = []
+
+    def answer(prompt):
+        env["prompts"].append(prompt)
+        return env["answers"].pop(0)
+
+    monkeypatch.setattr("builtins.input", answer)
+    return env
+
+
+def test_double_click_runs_a_bisect_and_waits_before_closing(clicked, capsys):
+    clicked["answers"] = ["Nope", "", "1", ""]
+    assert cli.main() == 0
+    data, _ = reports(clicked)
+    assert [c["packageId"] for c in data["culprits"]] == ["m11"]
+    assert "no such save" in capsys.readouterr().err
+    assert clicked["prompts"][-1].endswith("Press Enter to close this window.")
+
+
+def test_double_click_offers_to_resume(clicked, capsys):
+    clicked["rule"], _ = _interrupt_after(2, clicked["rule"])
+    clicked["answers"] = ["", "1", ""]
+    assert cli.main() == 130
+    clicked["rule"] = lambda mods: "m11" in mods
+    clicked["answers"] = ["", ""]
+    assert cli.main() == 0
+    assert "unfinished run" in clicked["prompts"][-2]
+    data, _ = reports(clicked)
+    assert data["status"] == "found" and len(list((clicked["work"] / "runs").iterdir())) == 1
+
+
+def test_double_click_keeps_a_crash_on_screen(clicked, capsys, monkeypatch):
+    monkeypatch.setattr(cli, "cmd_bisect", lambda args: 1 / 0)
+    clicked["answers"] = ["", ""]
+    assert cli.main() == 1
+    assert "ZeroDivisionError" in capsys.readouterr().err and clicked["answers"] == []
