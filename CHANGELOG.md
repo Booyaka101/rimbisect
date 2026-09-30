@@ -18,9 +18,12 @@ First release.
 - Every trial runs on a copy of your Config folder with `-savedatafolder`, so your real
   mod list, settings and saves are never written. A small probe mod, installed for the
   run and removed afterwards, reports errors, map-ready and done, and quits the game.
-  When the game gives up on a trial (map generation threw, or loading failed and it fell
-  back to Core alone) the probe says so and the trial ends as a crash right away, instead
-  of waiting for the timeout or passing on a vanilla game.
+  The copied Config folder is deleted when the run ends. When the game gives up on a
+  trial (map generation threw, or loading failed and it fell back to Core alone) the
+  probe says so and the trial ends as a crash right away, instead of waiting for the
+  timeout or passing on a vanilla game. When the game hits its 10,000 message limit and
+  stops logging, the probe switches logging back on and the report says which trials it
+  happened in.
 - `report.txt`, `report.json` and a `ModsConfig.fixed.xml` without the culprits (and the
   mods that need them) in every run folder.
 - `rimbisect mods` shows the mod list the way rimbisect reads it, with warnings for

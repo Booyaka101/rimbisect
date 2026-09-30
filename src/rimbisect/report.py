@@ -53,6 +53,7 @@ def trial_record(trial: Trial) -> dict:
         "outcome": trial.outcome,
         "seconds": trial.duration,
         "mapReadySeconds": trial.map_ready,
+        "logResets": trial.log_resets,
         "excerpt": trial.excerpt or None,
         "log": trial.log,
         "modList": trial.mods,
@@ -81,6 +82,10 @@ def build(*, status: str, run_dir: Path, game, config_path: Path, order: LoadOrd
                      "with --crash-is-fail")
     if hunting and counts[UNRESOLVED]:
         notes.append(f"{_count(counts[UNRESOLVED], 'trial')} hit the timeout and did not count as the error")
+    capped = [str(t.number) for t in trials if t.log_resets]
+    if capped:
+        notes.append(f"RimWorld's 10,000 message limit was hit in trial{'s' if len(capped) > 1 else ''} {', '.join(capped)}; the probe "
+                     "switched logging back on, but up to half a second of messages may be missing")
     if flaky:
         notes.append("some mod lists gave different results on repeat runs; the result may be unreliable")
     return {
@@ -144,7 +149,7 @@ def render_text(report: dict) -> str:
         out.append(f"note: {note}")
 
     trials = report["trials"]
-    out += ["", f"TRIALS  {len(trials)} run, {_duration(report['totalSeconds'])} total", "",
+    out += ["", f"TRIALS  {_count(len(trials), 'run')}, {_duration(report['totalSeconds'])} total", "",
             "   #  label                    mods  outcome        time"]
     shown = set()
     for t in trials:

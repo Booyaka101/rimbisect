@@ -7,6 +7,7 @@ import json
 import math
 import os
 import re
+import shutil
 import sys
 from contextlib import contextmanager
 from dataclasses import dataclass
@@ -16,7 +17,7 @@ from pathlib import Path
 from . import __version__, report
 from .errors import UserError
 from .install import EXE_NAME, Game, default_config_dir, find_game, process_running
-from .modlist import LoadOrder, ModsConfig, folder_mtime, read_mods_config, scan_mods
+from .modlist import PROBE_FOLDER, LoadOrder, ModsConfig, folder_mtime, read_mods_config, scan_mods
 from .search import Search
 from .signature import Criterion, ErrorGroup, group_errors
 from .trial import CRASH, FAIL, PASS, GameLauncher, Trial, install_probe, remove_probe
@@ -56,12 +57,16 @@ def _preflight(setup: Setup) -> None:
 
 
 @contextmanager
-def _probe_installed(game: Game):
-    install_probe(game)
+def _session(game: Game, launcher: GameLauncher):
+    """The probe is in the game's Mods folder for the duration; the copied Config goes afterwards."""
     try:
+        install_probe(game)
         yield
     finally:
         remove_probe(game)
+        shutil.rmtree(launcher.savedata, ignore_errors=True)
+        if (game.mods_dir / PROBE_FOLDER).exists():
+            log(f"warning: could not delete {game.mods_dir / PROBE_FOLDER}; delete it before you play")
 
 
 def _new_run(setup: Setup, args) -> tuple[Path, GameLauncher]:
@@ -144,7 +149,9 @@ def _changed(setup: Setup, candidates: list[str], args) -> list[str] | None:
             return None
         try:
             saved = json.loads(path.read_text(encoding="utf-8"))["mods"]
-        except (OSError, ValueError, KeyError) as exc:
+            if not all(isinstance(t, (int, float)) for t in saved.values()):
+                raise ValueError("folder times are not numbers")
+        except (OSError, ValueError, KeyError, TypeError, AttributeError) as exc:
             setup.warnings.append(f"ignored {path}: {exc}")
             return None
         # Folder times from a copy or restore can shift by a second or two.
@@ -208,17 +215,17 @@ def cmd_bisect(args) -> int:
     candidates = [pid for pid in setup.order.order if pid not in keep]
     if not candidates:
         raise UserError("every active mod is kept (Core, DLCs, --keep); there is nothing to search")
-    run_dir, launcher = _new_run(setup, args)
+    criterion = _criterion(args)
     log(f"rimbisect {__version__}: {len(setup.order.order)} active mods, {len(candidates)} to search")
+    changed = _changed(setup, candidates, args)
+    run_dir, launcher = _new_run(setup, args)
     log(f"run folder {run_dir}")
 
-    criterion = _criterion(args)
     fields = dict(run_dir=run_dir, game=setup.game, config_path=setup.config_path, order=setup.order,
                   searched=len(candidates), warnings=setup.warnings, trials=launcher.trials,
                   crash_is_fail=args.crash_is_fail)
     search: Search | None = None
-    changed = None
-    with _probe_installed(setup.game):
+    with _session(setup.game, launcher):
         try:
             baseline = _baseline(launcher, setup, criterion, args)
             hunted = _hunted(baseline, criterion, args)
@@ -236,7 +243,6 @@ def cmd_bisect(args) -> int:
             search = Search(setup.order, launcher, criterion, keep, repeats=args.repeats,
                             crash_is_fail=args.crash_is_fail, log=log)
             search.record(candidates, True)
-            changed = _changed(setup, candidates, args)
             culprits = search.locate(candidates, changed)
         except KeyboardInterrupt:
             log("interrupted; the game has been closed")
@@ -255,7 +261,7 @@ def cmd_check(args) -> int:
     criterion = _criterion(args)
     run_dir, launcher = _new_run(setup, args)
     log(f"rimbisect {__version__}: one trial with all {len(setup.order.order)} active mods")
-    with _probe_installed(setup.game):
+    with _session(setup.game, launcher):
         try:
             trial = launcher.run(setup.order.trial_list(setup.order.order), "check", criterion)
         except KeyboardInterrupt:
@@ -359,6 +365,9 @@ def main(argv: list[str] | None = None) -> int:
     except UserError as exc:
         print(f"rimbisect: error: {exc}", file=sys.stderr)
         return 2
+    except KeyboardInterrupt:
+        print("rimbisect: interrupted", file=sys.stderr)
+        return 130
 
 
 if __name__ == "__main__":

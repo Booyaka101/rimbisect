@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="utf-8"?>
+<ModMetaData>
+  <name>rimbisect acceptance: log flood</name>
+  <packageId>rimbisect.acceptance.flood</packageId>
+  <author>Booyaka101</author>
+  <supportedVersions>
+    <li>1.6</li>
+  </supportedVersions>
+  <description>Test mod for rimbisect. Logs 10,001 warnings while mods load, which switches the game's logging off.</description>
+</ModMetaData>

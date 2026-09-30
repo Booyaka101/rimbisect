@@ -10,7 +10,7 @@ from fakegame import CRITERION
 from rimbisect.install import Game
 from rimbisect.modlist import CORE, PROBE_ID, ModsConfig
 from rimbisect.signature import Criterion
-from rimbisect.trial import CRASH, FAIL, PASS, UNRESOLVED, GameLauncher
+from rimbisect.trial import CRASH, FAIL, PASS, UNRESOLVED, GameLauncher, prepare_savedata
 
 FAKE = Path(__file__).with_name("fake_rimworld.py")
 
@@ -87,6 +87,28 @@ def test_gave_up_excerpt_names_the_dialog_and_the_error(launcher, monkeypatch):
         "Error generating map: An error occurred while generating the map.",
         "Exception from asynchronous event: System.InvalidOperationException: boom",
     ]
+
+
+def test_log_lines_that_arrive_after_done_still_count(launcher, monkeypatch):
+    trial = run(launcher, monkeypatch, "late_line", Criterion(pattern=re.compile("rimbisectNoSuchField")))
+    assert trial.outcome == FAIL
+    assert "after the probe finished" not in trial.excerpt
+
+
+def test_log_lines_after_the_done_line_do_not_count(launcher, monkeypatch):
+    trial = run(launcher, monkeypatch, "late_line", Criterion(pattern=re.compile("after the probe finished")))
+    assert trial.outcome == PASS
+
+
+def test_log_resets_are_counted(launcher, monkeypatch):
+    trial = run(launcher, monkeypatch, "log_reset")
+    assert trial.outcome == PASS and trial.log_resets == 1
+
+
+def test_empty_prefs_is_replaced(launcher, tmp_path):
+    (tmp_path / "Config" / "Prefs.xml").write_text("")
+    prepare_savedata(tmp_path / "Config", launcher.savedata)
+    assert "<runInBackground>True</runInBackground>" in (launcher.savedata / "Config" / "Prefs.xml").read_text(encoding="utf-8")
 
 
 def test_exit_without_done_is_a_crash(launcher, monkeypatch):

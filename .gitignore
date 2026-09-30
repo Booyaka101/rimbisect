@@ -13,3 +13,5 @@ probe-src/obj/
 acceptance/work/
 acceptance/mapfail-src/bin/
 acceptance/mapfail-src/obj/
+acceptance/flood-src/bin/
+acceptance/flood-src/obj/

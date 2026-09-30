@@ -9,6 +9,8 @@ acceptance/work. The source mod list is only read. The test mods:
 
     brokendef  a def with a field that does not exist, logged as an XML error
     mapfail    throws while the starting map is generated (bisect with --crash-is-fail)
+    flood      logs 10,001 warnings while mods load, which switches the game's logging off.
+               Stage it into a brokendef list (--source) to check the error is still seen.
 """
 
 from __future__ import annotations
@@ -24,7 +26,7 @@ from rimbisect.install import default_config_dir, find_game  # noqa: E402
 from rimbisect.modlist import CORE, LoadOrder, read_mods_config, scan_mods  # noqa: E402
 
 HERE = Path(__file__).resolve().parent
-TEST_MODS = ("brokendef", "mapfail")
+TEST_MODS = ("brokendef", "mapfail", "flood")
 
 
 def install(args) -> None:

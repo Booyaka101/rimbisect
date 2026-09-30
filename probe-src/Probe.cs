@@ -1,6 +1,7 @@
 using System;
 using System.IO;
 using System.Linq;
+using System.Reflection;
 using System.Text;
 using System.Threading;
 using UnityEngine;
@@ -10,8 +11,7 @@ using Verse;
 namespace RimbisectProbe
 {
     // Inert unless rimbisect launched the game: it sets RIMBISECT_EVENTS to the file the
-    // trial watches. Everything is written there as JSON lines, because RimWorld switches
-    // the Unity log off after 10,000 messages and a big modlist can get there.
+    // trial watches, and everything is written there as JSON lines.
     public static class Probe
     {
         public static readonly string EventsPath = Environment.GetEnvironmentVariable("RIMBISECT_EVENTS");
@@ -34,6 +34,9 @@ namespace RimbisectProbe
         private static bool gaveUp;
         private static Timer watchdog;
 
+        private static readonly FieldInfo LogCapped =
+            typeof(Log).GetField("reachedMaxMessagesLimit", BindingFlags.NonPublic | BindingFlags.Static);
+
         // Titles of the dialogs the game shows when it abandons map generation or loading.
         private static readonly string[] GiveUpTitleKeys =
         {
@@ -50,17 +53,49 @@ namespace RimbisectProbe
             started = true;
             Application.logMessageReceivedThreaded += OnLog;
             SceneManager.sceneLoaded += OnSceneLoaded;
-            watchdog = new Timer(_ => CheckErrorDialogs(), null, 500, 500);
+            watchdog = new Timer(_ => Watch(), null, 500, 500);
             // Errors logged before this mod's constructor ran (assembly loading, earlier mod
-            // constructors) are only in Verse's own queue.
-            foreach (LogMessage message in Log.Messages.ToList())
+            // constructors) are only in Verse's own queue, which has no lock to take.
+            try
             {
-                if (message.type == LogMessageType.Error)
+                foreach (LogMessage message in Log.Messages.ToList())
                 {
-                    Emit("error", message.text, message.repeats);
+                    if (message.type == LogMessageType.Error)
+                    {
+                        Emit("error", message.text, message.repeats);
+                    }
                 }
             }
+            catch (Exception)
+            {
+                Emit("error", "rimbisect probe: could not read the errors logged before it loaded", 1);
+            }
             Emit("started", null, 1);
+            KeepLogging();
+        }
+
+        private static void Watch()
+        {
+            KeepLogging();
+            CheckErrorDialogs();
+        }
+
+        // After 10,000 messages RimWorld stops logging until someone clears the debug log, so
+        // an error that comes after a flood of unrelated ones would never be seen.
+        private static void KeepLogging()
+        {
+            try
+            {
+                if (LogCapped != null && (bool)LogCapped.GetValue(null))
+                {
+                    Log.ResetMessageCount();
+                    Emit("log_reset", null, 1);
+                }
+            }
+            catch (Exception)
+            {
+                // Logging stays off; the trial still ends on done or the timeout.
+            }
         }
 
         // When map generation throws, or loading fails and the game falls back to Core alone,

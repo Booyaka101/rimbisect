@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import os
 import shutil
+import signal
 import subprocess
 import time
 from dataclasses import dataclass, field
@@ -18,6 +19,7 @@ from .modlist import PROBE_FOLDER, PROBE_ID, ModsConfig
 from .signature import Criterion
 
 PASS, FAIL, CRASH, UNRESOLVED = "PASS", "FAIL", "CRASH", "UNRESOLVED"
+DONE_LINE = "RIMBISECT_DONE"
 
 # Unattended trials must keep running without focus; the rest just keeps them out of the way.
 PREF_OVERRIDES = {
@@ -40,6 +42,7 @@ class Trial:
     excerpt: str = ""
     log: str | None = None
     errors: list[tuple[str, int]] = field(default_factory=list)
+    log_resets: int = 0
 
     @property
     def mod_count(self) -> int:
@@ -72,11 +75,13 @@ def patch_prefs(path: Path) -> None:
     """Apply PREF_OVERRIDES to a copied Prefs.xml, adding the elements if missing."""
     from lxml import etree
 
+    root = None
     if path.is_file():
-        tree = etree.parse(str(path), etree.XMLParser(recover=True))
-        root = tree.getroot()
-    else:
-        root = None
+        try:
+            tree = etree.parse(str(path), etree.XMLParser(recover=True))
+            root = tree.getroot()
+        except etree.XMLSyntaxError:
+            pass
     if root is None:
         root = etree.Element("PrefsData")
         tree = etree.ElementTree(root)
@@ -102,14 +107,36 @@ def prepare_savedata(real_config: Path, savedata: Path) -> Path:
     return config
 
 
+# taskkill /T also takes processes whose parent merely had the same id before it was
+# reused, so children only count if they started after their parent.
+_DESCENDANTS = """
+$all = Get-CimInstance Win32_Process
+$queue = @($all | Where-Object ProcessId -eq {pid})
+while ($queue) {{
+    $parent, $queue = $queue
+    $kids = @($all | Where-Object {{ $_.ParentProcessId -eq $parent.ProcessId -and $_.CreationDate -ge $parent.CreationDate }})
+    $kids.ProcessId
+    $queue = @($queue) + $kids
+}}
+"""
+
+
 def kill_tree(proc: subprocess.Popen) -> None:
+    """Kill the process rimbisect started and the processes it started, nothing else."""
     if proc.poll() is not None:
         return
-    subprocess.run(["taskkill", "/PID", str(proc.pid), "/T", "/F"], capture_output=True)
+    listed = subprocess.run(["powershell", "-NoProfile", "-NonInteractive", "-Command",
+                             _DESCENDANTS.format(pid=proc.pid)], capture_output=True, text=True)
+    proc.kill()
+    for pid in listed.stdout.split():
+        try:
+            os.kill(int(pid), signal.SIGTERM)
+        except (OSError, ValueError):
+            pass
     try:
         proc.wait(timeout=30)
     except subprocess.TimeoutExpired:
-        proc.kill()
+        pass
 
 
 class _Tail:
@@ -170,17 +197,25 @@ class GameLauncher:
                                 stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         log_tail, events_tail = _Tail(log_path), _Tail(events_path)
         recent: list[str] = []
-        done = False
+        done = log_done = False
         gave_up: str | None = None
+
+        def read_log() -> None:
+            nonlocal recent, log_done
+            for line in log_tail.lines():
+                if log_done or line == DONE_LINE:
+                    log_done = True
+                    return
+                recent = (recent + [line])[-40:]
+                if criterion is not None and trial.outcome != FAIL and criterion.line_matches(line):
+                    trial.outcome, trial.excerpt = FAIL, line[:300]
+
         try:
             while True:
                 elapsed = time.monotonic() - started
                 # Checked before reading, so a process that has exited has also finished writing.
                 exited = proc.poll() is not None
-                for line in log_tail.lines():
-                    recent = (recent + [line])[-40:]
-                    if criterion is not None and trial.outcome != FAIL and criterion.line_matches(line):
-                        trial.outcome, trial.excerpt = FAIL, line[:300]
+                read_log()
                 for raw in events_tail.lines():
                     event = _parse_event(raw)
                     if event is None:
@@ -197,6 +232,8 @@ class GameLauncher:
                         done = True
                     elif kind == "gave_up":
                         gave_up = str(event.get("text", ""))
+                    elif kind == "log_reset":
+                        trial.log_resets += 1
                 if trial.outcome == FAIL:
                     break
                 if criterion is not None and criterion.slower_than is not None:
@@ -209,7 +246,16 @@ class GameLauncher:
                         trial.excerpt = f"map ready after {trial.map_ready:g}s"
                         break
                 if done:
-                    trial.outcome = PASS
+                    # The done event can overtake log lines written just before it.
+                    deadline = time.monotonic() + 30
+                    while not log_done and time.monotonic() < deadline:
+                        exited = proc.poll() is not None
+                        read_log()
+                        if exited:
+                            break
+                        time.sleep(self.poll)
+                    if trial.outcome != FAIL:
+                        trial.outcome = PASS
                     break
                 if gave_up is not None:
                     trial.outcome = CRASH

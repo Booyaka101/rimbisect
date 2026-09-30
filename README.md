@@ -76,7 +76,7 @@ CULPRIT  rimbisect acceptance: broken def  (rimbisect.acceptance.brokendef)
 Your mod list without 1 mod:
   D:\Repos\ideas\rimbisect\acceptance\work\rb\runs\2026-09-30_09-25-24\ModsConfig.fixed.xml
 
-TRIALS  11 run, 7m24s total
+TRIALS  11 runs, 7m24s total
 
    #  label                    mods  outcome        time
    1  baseline                  200  FAIL          98.7s
@@ -133,12 +133,15 @@ estimate from the 200 mod timings, not a measurement.
 
 - **Isolation.** Each trial runs the game with `-savedatafolder` pointing at
   the run folder, which holds a copy of your `Config` folder (mod settings included) and
-  the trial's mod list. Your `ModsConfig.xml`, `Prefs.xml` and saves are only read.
+  the trial's mod list. The copy is deleted when the run ends. Your `ModsConfig.xml`,
+  `Prefs.xml` and saves are only read.
 - **A probe mod.** rimbisect copies a small mod, `rimbisect-probe`, into the game's
   `Mods` folder for the run and deletes it afterwards, also on Ctrl+C. It loads last,
   writes errors and progress to a file rimbisect watches, and closes the game once the
-  map has settled. It has no Harmony patches and does nothing when rimbisect did not
-  start the game. If rimbisect is killed hard, delete `Mods\rimbisect-probe` yourself.
+  map has settled. RimWorld stops logging after 10,000 messages, which a big list can
+  reach while loading; the probe switches logging back on so a later error is still
+  seen. It has no Harmony patches and does nothing when rimbisect did not start the
+  game. If rimbisect is killed hard, delete `Mods\rimbisect-probe` yourself.
 - **Dependencies are respected.** Every trial includes the mods that the mods under test
   need, so there are no "missing dependency" errors that the full list doesn't have.
   Missing dependencies are never invented; rimbisect warns about them instead.

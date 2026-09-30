@@ -36,7 +36,10 @@ def env(tmp_path, monkeypatch):
             state["probe_seen"].append((game.mods_dir / PROBE_FOLDER / "About" / "About.xml").is_file())
             return state["rule"](mods)
 
-        return FakeGame(None, rule)
+        fake = FakeGame(None, rule)
+        fake.savedata = run_dir / "savedata"
+        (fake.savedata / "Config").mkdir(parents=True)
+        return fake
 
     monkeypatch.setattr(cli, "GameLauncher", launcher)
     monkeypatch.setattr(cli, "default_config_dir", lambda: config_dir)
@@ -63,6 +66,8 @@ def test_bisect_with_match_finds_the_culprit(env, capsys):
     assert (run / "report.txt").read_text(encoding="utf-8") == out
     assert env["probe_seen"] and all(env["probe_seen"])
     assert not (env["root"] / "Mods" / PROBE_FOLDER).exists()
+    assert not (run / "savedata").exists()
+    assert "TRIALS  " in out and " runs, " in out
 
 
 def test_culprit_with_dependents_is_removed_with_them(env, capsys):
@@ -137,6 +142,25 @@ def test_check_fails_on_match(env, capsys):
 def test_since_date(env, capsys):
     assert cli.main(["bisect", *env["args"], "--match", "cross-reference", "--since", "31/12/2025"]) == 2
     assert "--since takes a date" in capsys.readouterr().err
+    assert not (env["work"] / "runs").exists()
+
+
+def test_broken_last_good_is_ignored_with_a_warning(env, capsys):
+    env["work"].mkdir()
+    (env["work"] / "last-good.json").write_text('{"mods": {"m07": null}}')
+    assert cli.main(["bisect", *env["args"], "--match", "cross-reference"]) == 0
+    data, _ = reports(env)
+    assert data["changedMods"] is None
+    assert any("last-good.json" in w for w in data["warnings"])
+
+
+def test_interrupt_before_any_trial(env, capsys, monkeypatch):
+    def interrupted(game):
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr(cli, "install_probe", interrupted)
+    assert cli.main(["bisect", *env["args"], "--match", "cross-reference"]) == 130
+    assert "interrupted" in capsys.readouterr().err
 
 
 def test_interrupt_writes_a_partial_report(env, capsys, monkeypatch):
@@ -163,6 +187,7 @@ def test_user_errors(env, tmp_path, capsys):
     env["running"].clear()
     assert cli.main(["bisect", *env["args"], "--match", "(unclosed"]) == 2
     assert "not a valid regular expression" in capsys.readouterr().err
+    assert not (env["work"] / "runs").exists()
     assert cli.main(["mods", "--game", str(tmp_path)]) == 2
     assert "does not contain RimWorldWin64.exe" in capsys.readouterr().err
     assert cli.main(["mods", *env["args"], "--config", str(tmp_path / "nope.xml")]) == 2

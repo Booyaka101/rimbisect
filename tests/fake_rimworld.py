@@ -27,8 +27,18 @@ def emit(kind, text=None):
 scenario = os.environ["FAKE_SCENARIO"]
 say("Mono path[0] = 'fake'")
 emit("started")
-if scenario == "pass":
+if scenario == "late_line":
+    emit("map_ready")
+    emit("done")
+    time.sleep(0.5)
+    say("XML error: <rimbisectNoSuchField>1</rimbisectNoSuchField> doesn't correspond to any field")
+    say("RIMBISECT_DONE")
+    say("XML error: after the probe finished, so it does not count: rimbisectNoSuchField")
+    sys.exit(0)
+if scenario in ("pass", "log_reset"):
     emit("error", "Some unrelated error")
+    if scenario == "log_reset":
+        emit("log_reset")
     emit("map_ready")
     say("RIMBISECT_MAP_READY")
     emit("done")
