@@ -1,0 +1,9 @@
+<?xml version="1.0" encoding="utf-8"?>
+<Defs>
+  <ThingCategoryDef>
+    <defName>RimbisectAcceptance</defName>
+    <label>rimbisect acceptance</label>
+    <parent>Root</parent>
+    <rimbisectNoSuchField>1</rimbisectNoSuchField>
+  </ThingCategoryDef>
+</Defs>

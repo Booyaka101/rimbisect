@@ -1,0 +1,50 @@
+"""Stands in for RimWorldWin64.exe in test_trial.py: writes a log and probe events the way
+the game and the probe do, following the scenario named in FAKE_SCENARIO."""
+
+import json
+import os
+import sys
+import time
+
+args = sys.argv[1:]
+log = open(args[args.index("-logFile") + 1], "a", encoding="utf-8")
+events = open(os.environ["RIMBISECT_EVENTS"], "a", encoding="utf-8")
+with open(os.environ["FAKE_PID_FILE"], "w") as fh:
+    fh.write(str(os.getpid()))
+
+
+def say(line):
+    log.write(line + "\n")
+    log.flush()
+
+
+def emit(kind, text=None):
+    event = {"event": kind} if text is None else {"event": kind, "text": text}
+    events.write(json.dumps(event) + "\n")
+    events.flush()
+
+
+scenario = os.environ["FAKE_SCENARIO"]
+say("Mono path[0] = 'fake'")
+emit("started")
+if scenario == "pass":
+    emit("error", "Some unrelated error")
+    emit("map_ready")
+    say("RIMBISECT_MAP_READY")
+    emit("done")
+    say("RIMBISECT_DONE")
+    sys.exit(0)
+if scenario == "error":
+    emit("error", "Could not resolve cross-reference to Verse.ThingDef named Widget_12 (wanter=thingDef)")
+elif scenario == "logline":
+    say("XML error: <rimbisectNoSuchField>1</rimbisectNoSuchField> doesn't correspond to any field")
+elif scenario == "exit":
+    say("Crash!!!")
+    sys.exit(1)
+elif scenario == "gave_up":
+    emit("error", "Exception from asynchronous event: System.InvalidOperationException: boom\n  at Some.Frame ()")
+    emit("gave_up", "Error generating map: An error occurred while generating the map.")
+elif scenario == "slow_map":
+    time.sleep(1.5)
+    emit("map_ready")
+time.sleep(60)

@@ -1,0 +1,73 @@
+from rimbisect.about import parse_about
+
+
+def write(tmp_path, xml, folder="1234567890", published=None):
+    about = tmp_path / folder / "About"
+    about.mkdir(parents=True)
+    (about / "About.xml").write_text(xml, encoding="utf-8")
+    if published:
+        (about / "PublishedFileId.txt").write_text(published)
+    return about / "About.xml"
+
+
+def test_basic_fields_and_lowercased_ids(tmp_path):
+    path = write(tmp_path, """<ModMetaData>
+      <name>Some Mod</name><packageId>Author.SomeMod</packageId>
+      <supportedVersions><li>1.5</li><li>1.6</li></supportedVersions>
+      <modDependencies><li><packageId>brrainz.Harmony</packageId><displayName>Harmony</displayName></li></modDependencies>
+      <loadAfter><li>Ludeon.RimWorld</li></loadAfter>
+      <forceLoadBefore><li>Other.Mod</li></forceLoadBefore>
+    </ModMetaData>""")
+    mod = parse_about(path, "1.6")
+    assert mod.package_id == "author.somemod"
+    assert mod.name == "Some Mod"
+    assert [d.package_id for d in mod.dependencies] == ["brrainz.harmony"]
+    assert mod.dependencies[0].name == "Harmony"
+    assert mod.load_after == ["ludeon.rimworld"]
+    assert mod.load_before == ["other.mod"]
+    assert mod.supported_versions == ["1.5", "1.6"]
+    assert mod.workshop_id == "1234567890"
+
+
+def test_versioned_lists_replace_the_base_list(tmp_path):
+    path = write(tmp_path, """<ModMetaData><packageId>a.b</packageId>
+      <modDependencies><li><packageId>old.dep</packageId></li></modDependencies>
+      <modDependenciesByVersion><v1.6><li><packageId>new.dep</packageId></li></v1.6></modDependenciesByVersion>
+      <loadAfter><li>x.y</li></loadAfter>
+      <loadAfterByVersion><v1.5><li>only.for.fifteen</li></v1.5></loadAfterByVersion>
+    </ModMetaData>""")
+    mod = parse_about(path, "1.6")
+    assert [d.package_id for d in mod.dependencies] == ["new.dep"]
+    assert mod.load_after == ["x.y"]
+    assert [d.package_id for d in parse_about(path, "1.5").dependencies] == ["old.dep"]
+
+
+def test_alternative_package_ids(tmp_path):
+    path = write(tmp_path, """<ModMetaData><packageId>a.b</packageId><modDependencies><li>
+      <packageId>dep.one</packageId><alternativePackageIds><li>Dep.Two</li></alternativePackageIds>
+    </li></modDependencies></ModMetaData>""")
+    dep = parse_about(path, "1.6").dependencies[0]
+    assert dep.package_id == "dep.one"
+    assert dep.alternatives == ("dep.two",)
+
+
+def test_sloppy_xml_still_parses(tmp_path):
+    path = write(tmp_path, "<ModMetaData><name>Guns & Roses</name><packageId>g.r</packageId>"
+                           "<description>unclosed <b>tag</description></ModMetaData>")
+    mod = parse_about(path, "1.6")
+    assert mod.package_id == "g.r"
+    assert "Guns" in mod.name
+
+
+def test_missing_package_id(tmp_path):
+    assert parse_about(write(tmp_path, "<ModMetaData><name>x</name></ModMetaData>"), "1.6") is None
+
+
+def test_published_file_id_wins_over_folder_name(tmp_path):
+    path = write(tmp_path, "<ModMetaData><packageId>a.b</packageId></ModMetaData>", folder="My Mod", published="987654321\n")
+    assert parse_about(path, "1.6").workshop_id == "987654321"
+
+
+def test_local_folder_without_id(tmp_path):
+    path = write(tmp_path, "<ModMetaData><packageId>a.b</packageId></ModMetaData>", folder="Mein Mod ünï")
+    assert parse_about(path, "1.6").workshop_id is None

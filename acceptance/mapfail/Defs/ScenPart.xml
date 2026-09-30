@@ -1,0 +1,9 @@
+<?xml version="1.0" encoding="utf-8"?>
+<Defs>
+  <ScenPartDef>
+    <defName>RimbisectFailMap</defName>
+    <label>rimbisect map failure</label>
+    <category>Fixed</category>
+    <scenPartClass>RimbisectMapFail.ScenPart_FailMap</scenPartClass>
+  </ScenPartDef>
+</Defs>

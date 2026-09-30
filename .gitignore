@@ -1,0 +1,15 @@
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.venv/
+dist/
+build/
+*.egg-info/
+runs/
+probe-src/bin/
+probe-src/obj/
+.tools/
+.phase0/
+acceptance/work/
+acceptance/mapfail-src/bin/
+acceptance/mapfail-src/obj/

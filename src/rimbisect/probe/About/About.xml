@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="utf-8"?>
+<ModMetaData>
+  <packageId>rimbisect.probe</packageId>
+  <name>rimbisect probe</name>
+  <author>Booyaka101</author>
+  <url>https://github.com/Booyaka101/rimbisect</url>
+  <supportedVersions>
+    <li>1.6</li>
+  </supportedVersions>
+  <description>Installed and removed by the rimbisect command line tool while it tests your mod list. It reports when the test map is ready, records errors, and closes the game. It does nothing when the game is started normally.</description>
+</ModMetaData>
