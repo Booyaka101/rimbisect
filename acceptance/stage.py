@@ -9,8 +9,9 @@ acceptance/work. The source mod list is only read. The test mods:
 
     brokendef  a def with a field that does not exist, logged as an XML error
     mapfail    throws while the starting map is generated (bisect with --crash-is-fail)
-    flood      logs 10,001 warnings while mods load, which switches the game's logging off.
-               Stage it into a brokendef list (--source) to check the error is still seen.
+    flood      logs 10,001 warnings while mods load, which switches the game's logging off,
+               then 10,001 more at startup followed by the error rimbisectLateFloodError.
+               Stage it into a brokendef list (--source) to check both errors are still seen.
 """
 
 from __future__ import annotations

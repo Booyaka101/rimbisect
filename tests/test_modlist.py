@@ -5,7 +5,7 @@ import pytest
 from fakegame import make_order, write_mod
 from rimbisect.errors import UserError
 from rimbisect.install import Game, library_with_app, parse_vdf
-from rimbisect.modlist import CORE, PROBE_ID, LoadOrder, read_mods_config, scan_mods
+from rimbisect.modlist import CORE, PROBE_ID, LoadOrder, ModsConfig, read_mods_config, scan_mods
 
 VDF = r'''
 "libraryfolders"
@@ -114,6 +114,31 @@ def test_alternative_dependency_satisfied_by_either():
 
     order = make_order(4)
     order.mods["m03"].dependencies = [Dependency("m00", ("m01",))]
-    assert order.closure({"m03", "m01"}) == {"m03", "m01"}
+    # Both active alternatives come along, so the closure of a union is the union of closures.
+    assert order.closure({"m03"}) == {"m03", "m00", "m01"}
     assert order.dependents(["m00"]) == []
     assert order.dependents(["m00", "m01"]) == ["m03"]
+
+
+def test_declared_incompatibilities_are_warned_about():
+    order = make_order(3)
+    order.mods["m02"].incompatible_with = ["m00", "not.active"]
+    warnings = []
+    LoadOrder.build(order.config, order.mods, warnings)
+    assert warnings == ["Mod m02 (m02) says it is incompatible with Mod m00 (m00), and both are active"]
+
+
+def test_steam_copy_satisfies_a_dependency_like_in_the_game():
+    from rimbisect.about import Dependency, Mod
+
+    order = make_order(3)
+    mods = dict(order.mods)
+    mods["lib_steam"] = Mod("lib_steam", "Lib", Path("workshop/1"), workshop_id="1")
+    mods["lib"] = Mod("lib", "Lib", Path("Mods/lib"))
+    mods["m02"].dependencies = [Dependency("lib")]
+    warnings = []
+    config = ModsConfig("1.6", [CORE, "m00", "m01", "lib_steam", "m02"], [])
+    order = LoadOrder.build(config, mods, warnings)
+    assert not any("needs" in w for w in warnings)
+    assert order.closure({"m02"}) == {"m02", "lib_steam"}
+    assert order.dependents(["lib_steam"]) == ["m02"]

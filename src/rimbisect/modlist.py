@@ -9,7 +9,7 @@ from xml.sax.saxutils import escape
 
 from lxml import etree
 
-from .about import Mod, parse_about
+from .about import Dependency, Mod, parse_about
 from .errors import UserError
 from .install import Game
 
@@ -108,13 +108,16 @@ class ModsConfig:
 
 def read_mods_config(path: Path) -> ModsConfig:
     if not path.is_file():
-        raise UserError(f"no ModsConfig.xml at {path}. Pass the right file with --config.")
+        raise UserError(f"no ModsConfig.xml at {path}. Start RimWorld once and quit from the main menu "
+                        "so it writes one, or pass the right file with --config.")
     try:
         root = etree.parse(str(path), etree.XMLParser(recover=True)).getroot()
     except (OSError, etree.XMLSyntaxError) as exc:
-        raise UserError(f"could not read {path}: {exc}") from exc
+        raise UserError(f"could not read {path}: {exc}. If it is the game's own, start RimWorld once "
+                        "and quit from the main menu so it is written again.") from exc
     if root is None or root.find("activeMods") is None:
-        raise UserError(f"{path} has no <activeMods> list; is it a ModsConfig.xml?")
+        raise UserError(f"{path} has no <activeMods> list; is it a ModsConfig.xml? If it is the game's "
+                        "own, start RimWorld once and quit from the main menu so it is written again.")
 
     def items(tag: str) -> list[str]:
         holder = root.find(tag)
@@ -151,6 +154,7 @@ class LoadOrder:
     order: list[str] = field(default_factory=list)  # lowercased ids, player's order
     spelling: dict[str, str] = field(default_factory=dict)  # lowercased id -> as written
     warnings: list[str] = field(default_factory=list)
+    by_base_id: dict[str, list[str]] = field(default_factory=dict)  # packageId without "_steam" -> active ids
 
     @classmethod
     def build(cls, config: ModsConfig, mods: dict[str, Mod], warnings: list[str]) -> LoadOrder:
@@ -165,29 +169,45 @@ class LoadOrder:
             lo.order.append(key)
             lo.spelling[key] = entry
         if CORE not in lo.spelling:
-            raise UserError("the active mod list does not include Core (ludeon.rimworld)")
-        active = set(lo.order)
+            raise UserError("the active mod list does not include Core (ludeon.rimworld); "
+                            "enable Core in the game's mod manager first")
+        for pid in lo.order:
+            base = pid.removesuffix(STEAM_POSTFIX)
+            if base not in mods:
+                base = pid
+            lo.by_base_id.setdefault(base, []).append(pid)
         for pid in lo.order:
             for dep in mods[pid].dependencies:
-                if not ({dep.package_id, *dep.alternatives} & active):
+                if not lo.providers(dep):
                     warnings.append(f"{mods[pid].name} ({pid}) needs {dep.name or dep.package_id} ({dep.package_id}), "
                                     "which is not in the active list; rimbisect will not add it")
+            for other in mods[pid].incompatible_with:
+                for active in lo.by_base_id.get(other, ()):
+                    warnings.append(f"{mods[pid].name} ({pid}) says it is incompatible with "
+                                    f"{mods[active].name} ({active}), and both are active")
         return lo
 
-    def closure(self, ids) -> set[str]:
-        """ids plus their hard dependencies, transitively, taken from the active list only."""
-        active = set(self.order)
-        out = {i for i in ids if i in active}
+    def providers(self, dep: Dependency) -> list[str]:
+        """Active mods that satisfy dep. Like the game, a workshop copy renamed with the
+        "_steam" postfix still counts as the mod it is a copy of."""
+        return [pid for option in (dep.package_id, *dep.alternatives) for pid in self.by_base_id.get(option, ())]
+
+    def closure(self, ids, excluded=frozenset()) -> set[str]:
+        """ids plus their hard dependencies, transitively, taken from the active list only.
+
+        Every active alternative comes along, not just one: picking one would make the
+        closure of a union differ from the union of closures, and the search relies on it
+        not doing that. Alternatives in excluded are left out while another one is there.
+        """
+        out = {i for i in ids if i in self.spelling}
         stack = list(out)
         while stack:
             for dep in self.mods[stack.pop()].dependencies:
-                options = (dep.package_id, *dep.alternatives)
-                if any(o in out for o in options):
-                    continue
-                chosen = next((o for o in options if o in active), None)
-                if chosen is not None:
-                    out.add(chosen)
-                    stack.append(chosen)
+                options = self.providers(dep)
+                for pid in [p for p in options if p not in excluded] or options:
+                    if pid not in out:
+                        out.add(pid)
+                        stack.append(pid)
         return out
 
     def dependents(self, ids) -> list[str]:
@@ -201,8 +221,8 @@ class LoadOrder:
                 if pid in gone:
                     continue
                 for dep in self.mods[pid].dependencies:
-                    options = {dep.package_id, *dep.alternatives}
-                    if options & set(self.order) and not options & remaining:
+                    options = self.providers(dep)
+                    if options and not remaining.intersection(options):
                         gone.add(pid)
                         changed = True
                         break
@@ -211,9 +231,9 @@ class LoadOrder:
     def official(self) -> list[str]:
         return [pid for pid in self.order if self.mods[pid].official]
 
-    def trial_list(self, ids) -> list[str]:
-        """Player's order filtered to closure(ids), with the probe last."""
-        keep = self.closure(ids)
+    def trial_list(self, ids, excluded=frozenset()) -> list[str]:
+        """Player's order filtered to closure(ids, excluded), with the probe last."""
+        keep = self.closure(ids, excluded)
         return [pid for pid in self.order if pid in keep] + [PROBE_ID]
 
     def written(self, ids: list[str]) -> list[str]:

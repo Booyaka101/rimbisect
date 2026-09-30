@@ -11,6 +11,9 @@ common single-culprit case. Never two assumptions in a row. If both halves pass 
 the failure needs mods from both: it finds the needed part of the second half with all
 of the first loaded, then the needed part of the first with only that loaded. The same
 recursion handles three or more mods.
+
+Once a cause is found, the list without it is run once more. If that still fails, there
+is a second, independent cause, and the search goes on in what is left.
 """
 
 from __future__ import annotations
@@ -19,11 +22,20 @@ from collections.abc import Callable, Iterable
 
 from .modlist import LoadOrder
 from .signature import Criterion
-from .trial import CRASH, FAIL, Launcher, Trial
+from .trial import CRASH, FAIL, UNRESOLVED, Launcher, Trial
 
 
 class _Unconfirmed(Exception):
     """An assumed-failing half turned out not to fail on its own."""
+
+
+class Inconclusive(Exception):
+    """The same mod list gave no answer twice (a timeout, or mods the game did not load)."""
+
+    def __init__(self, trial: Trial):
+        reason = trial.excerpt.splitlines()[0] if trial.excerpt else "no result"
+        super().__init__(f"trial {trial.number} gave no answer twice on the same {trial.mod_count} mods ({reason})")
+        self.trial = trial
 
 
 class Search:
@@ -39,9 +51,15 @@ class Search:
         self.cache: dict[frozenset[str], bool] = {}
         self.flaky: list[dict] = []
         self.saw_pass = False
+        self.base_fails = False
+        # Mods taken out of the search, which no trial may load as an alternative dependency.
+        self.excluded: set[str] = set()
+
+    def _mods(self, ids: Iterable[str]) -> list[str]:
+        return self.order.trial_list(set(ids) | self.keep, self.excluded)
 
     def _key(self, ids: Iterable[str]) -> frozenset[str]:
-        return frozenset(self.order.trial_list(set(ids) | self.keep))
+        return frozenset(self._mods(ids))
 
     def record(self, ids: Iterable[str], failed: bool) -> None:
         """Seed the cache with a result obtained elsewhere (the baseline)."""
@@ -52,7 +70,7 @@ class Search:
         return self.cache.get(self._key(ids))
 
     def fails(self, ids: Iterable[str], label: str = "bisect") -> bool:
-        mods = self.order.trial_list(set(ids) | self.keep)
+        mods = self._mods(ids)
         key = frozenset(mods)
         if key in self.cache:
             return self.cache[key]
@@ -60,11 +78,10 @@ class Search:
         runs: list[Trial] = []
         # A reproduced error is conclusive; a pass is only trusted after every repeat.
         while len(outcomes) < self.repeats and not any(outcomes):
-            trial = self.launcher.run(mods, label, self.criterion)
+            trial = self._run(mods, label)
             failed = trial.outcome == FAIL or (self.crash_is_fail and trial.outcome == CRASH)
             outcomes.append(failed)
             runs.append(trial)
-            self.log(trial.line())
         failed = any(outcomes)
         if len(set(outcomes)) > 1:
             self.flaky.append({"mods": runs[0].mod_count, "trials": [t.number for t in runs],
@@ -73,6 +90,23 @@ class Search:
         self.cache[key] = failed
         self.saw_pass |= not failed
         return failed
+
+    def _run(self, mods: list[str], label: str) -> Trial:
+        """One trial, run again once if it gave no answer, or crashed before the error could show.
+
+        Big mod lists crash now and then for no reason that repeats; a crash that does repeat
+        counts as not showing the error.
+        """
+        for attempt in range(2):
+            trial = self.launcher.run(mods, label, self.criterion)
+            self.log(trial.line())
+            if trial.outcome == UNRESOLVED:
+                label = "no answer, again"
+            elif trial.outcome == CRASH and not self.crash_is_fail and attempt == 0:
+                label = "crashed, again"
+            else:
+                return trial
+        raise Inconclusive(trial)
 
     def find(self, candidates: list[str], fixed: set[str] | None = None, verified: bool = True) -> set[str]:
         """A small subset M of candidates with fails(fixed | M).
@@ -107,8 +141,8 @@ class Search:
     def _through_dependencies(self, pid: str, fixed: set[str]) -> set[str]:
         """A culprit that only failed together with the dependencies it pulled in may be
         innocent: check whether those dependencies fail without it."""
-        already = self.order.closure(fixed | self.keep)
-        pulled = [d for d in self.order.order if d in self.order.closure({pid}) - already - {pid}]
+        already = self.order.closure(fixed | self.keep, self.excluded)
+        pulled = [d for d in self.order.order if d in self.order.closure({pid}, self.excluded) - already - {pid}]
         if pulled and self.fails(fixed | set(pulled), "dependency check"):
             return self.find(pulled, fixed)
         return {pid}
@@ -121,10 +155,12 @@ class Search:
             removed = set(changed) | set(self.order.dependents(changed))
             unchanged = [c for c in candidates if c not in removed]
             recent = [c for c in candidates if c in removed]
+            self.excluded |= removed
             if self.fails(unchanged, "without changed mods"):
                 self.log(f"the error reproduces without the {len(recent)} changed mods; searching the rest")
                 candidates = unchanged
             else:
+                self.excluded -= removed
                 self.log(f"the error needs at least one of the {len(recent)} changed mods")
                 found = self.find(recent, set(unchanged))
                 if not self.fails(found, "changed mods alone"):
@@ -136,3 +172,21 @@ class Search:
         if not self.saw_pass and self.fails(set(), "base game only"):
             return set()
         return found
+
+    def locate_all(self, candidates: list[str], changed: list[str] | None = None) -> list[set[str]]:
+        """Every independent cause among candidates, as one set of culprits each. When the
+        kept mods alone fail, base_fails is set and the causes found before that are returned."""
+        groups: list[set[str]] = []
+        while True:
+            found = self.locate(candidates, changed)
+            if not found:
+                self.base_fails = True
+                return groups
+            groups.append(found)
+            self.excluded |= found
+            self.excluded |= set(self.order.dependents(self.excluded))
+            candidates = [c for c in candidates if c not in self.excluded]
+            if not self.fails(candidates, "without the culprits"):
+                return groups
+            self.log(f"the error still happens without {', '.join(sorted(found))}; searching the rest")
+            changed = None

@@ -4,7 +4,8 @@ import pytest
 
 from fakegame import CRITERION, FakeGame, make_order
 from rimbisect.modlist import CORE
-from rimbisect.search import Search
+from rimbisect.search import Inconclusive, Search
+from rimbisect.trial import CRASH, UNRESOLVED
 
 DEPS = {"m10": ["m05"]}
 
@@ -67,6 +68,14 @@ def test_dependent_culprit_keeps_its_dependency_loaded():
     assert all("m05" in run for run in game.runs if "m10" in run)
 
 
+def test_alternative_dependencies_do_not_mislead_the_search():
+    # m10 needs m06 or m08, m08 needs m05. Pulling in only the first active alternative
+    # made {m05, m10} look like it failed on its own, because it also loaded m06. Like a
+    # hard dependency, m06 comes along with m10 and is not blamed.
+    found, _ = search_for(lambda mods: {"m06", "m10"} <= mods, deps={"m10": ["m06|m08"], "m08": ["m05"]})
+    assert found == {"m10"}
+
+
 def test_base_game_alone_failing_blames_no_mod():
     found, game = search_for(lambda mods: True)
     assert found == set()
@@ -98,6 +107,68 @@ def test_results_are_cached_by_mod_set():
     found, game = search_for(lambda mods: "m33" in mods)
     keys = [frozenset(run) for run in game.runs]
     assert len(keys) == len(set(keys))
+
+
+def locate_all(rule, n=64, deps=DEPS):
+    order = make_order(n, deps)
+    game = FakeGame(order, rule)
+    search = Search(order, game, CRITERION, keep={CORE}, log=lambda _: None)
+    search.record(order.order[1:], True)
+    return search.locate_all(order.order[1:]), search, game
+
+
+def test_a_culprit_that_is_also_an_alternative_is_not_loaded_again():
+    # m10 needs m06 or m08. Without m06, m10 still loads on m08, and m06 must not come
+    # back as its alternative, or the search finds m06 again forever.
+    causes, _, game = locate_all(lambda mods: "m06" in mods, deps={"m10": ["m06|m08"]})
+    assert causes == [{"m06"}]
+    assert "m06" not in game.runs[-1] and {"m08", "m10"} <= set(game.runs[-1])
+
+
+def test_changed_mods_left_out_stay_out_as_alternatives():
+    found, game = search_for(lambda mods: "m33" in mods, deps={"m10": ["m06|m08"]}, changed=["m06"])
+    assert found == {"m33"}
+    assert game.trials[0].label == "without changed mods"
+    assert not any("m06" in run for run in game.runs)
+
+
+def test_one_cause_is_confirmed_with_one_more_trial():
+    causes, _, game = locate_all(lambda mods: "m33" in mods)
+    assert causes == [{"m33"}]
+    assert game.trials[-1].label == "without the culprits" and "m33" not in game.runs[-1]
+
+
+def test_independent_causes_are_all_found():
+    causes, _, _ = locate_all(lambda mods: "m20" in mods or {"m41", "m50"} <= mods)
+    assert sorted(map(sorted, causes)) == [["m20"], ["m41", "m50"]]
+
+
+def test_removing_a_culprit_removes_its_dependents_before_confirming():
+    causes, _, game = locate_all(lambda mods: "m05" in mods)
+    assert causes == [{"m05"}]
+    assert not {"m05", "m10"} & set(game.runs[-1])
+
+
+@pytest.mark.parametrize("outcome, label", [(UNRESOLVED, "no answer, again"), (CRASH, "crashed, again")])
+def test_a_timeout_or_a_crash_is_run_again(outcome, label):
+    seen = []
+
+    def rule(mods):
+        seen.append(frozenset(mods))
+        if seen.count(frozenset(mods)) == 1 and len(mods) < 40:
+            return outcome
+        return "m33" in mods
+
+    causes, _, game = locate_all(rule)
+    assert causes == [{"m33"}]
+    assert any(t.label == label for t in game.trials)
+
+
+def test_timing_out_twice_on_the_same_list_stops_the_search():
+    with pytest.raises(Inconclusive) as info:
+        locate_all(lambda mods: UNRESOLVED if len(mods) < 40 else "m33" in mods)
+    assert info.value.trial.outcome == UNRESOLVED
+    assert "gave no answer twice" in str(info.value)
 
 
 def test_flaky_trials_are_reported():

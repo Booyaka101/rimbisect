@@ -8,7 +8,7 @@ from pathlib import Path
 from rimbisect.about import Dependency, Mod
 from rimbisect.modlist import CORE, PROBE_ID, LoadOrder, ModsConfig
 from rimbisect.signature import Criterion, signature_of
-from rimbisect.trial import CRASH, FAIL, PASS, Trial
+from rimbisect.trial import CRASH, FAIL, PASS, UNRESOLVED, Trial
 
 ERROR = "Could not resolve cross-reference to Verse.ThingDef named Widget_12 (wanter=thingDef)"
 CRITERION = Criterion(signature=signature_of(ERROR))
@@ -31,14 +31,21 @@ def make_order(n: int = 64, deps: dict[str, list[str]] | None = None, dlcs=()) -
     for dlc in dlcs:
         mods[dlc] = Mod(dlc, dlc, Path("Data") / dlc, official=True)
     for pid in ids:
+        # "a|b" is a dependency on a with b as an alternative.
         mods[pid] = Mod(pid, f"Mod {pid}", Path("Mods") / pid,
-                        dependencies=[Dependency(d) for d in deps.get(pid, [])])
+                        dependencies=[Dependency(*_split(d)) for d in deps.get(pid, [])])
     config = ModsConfig("1.6.4871 rev590", [CORE, *dlcs, *ids], list(dlcs))
     return LoadOrder.build(config, mods, [])
 
 
+def _split(dep: str) -> tuple[str, tuple[str, ...]]:
+    first, *rest = dep.split("|")
+    return first, tuple(rest)
+
+
 class FakeGame:
-    """Logs ERROR whenever rule(loaded mods) is true, and crashes when it returns CRASH.
+    """Logs ERROR whenever rule(loaded mods) is true, and crashes or times out when it
+    returns CRASH or UNRESOLVED.
     With an order, it also checks that every trial list is dependency-safe and in the
     player's order."""
 
@@ -54,14 +61,14 @@ class FakeGame:
         if self.order is not None:
             for pid in mods[:-1]:
                 for dep in self.order.mods[pid].dependencies:
-                    assert dep.package_id in loaded, f"{pid} loaded without its dependency {dep.package_id}"
+                    assert {dep.package_id, *dep.alternatives} & loaded, f"{pid} loaded without {dep.package_id}"
             positions = [self.order.order.index(pid) for pid in mods[:-1]]
             assert positions == sorted(positions), "trial lists must keep the player's order"
         self.runs.append(list(mods))
         hit = self.rule(loaded)
-        errors = [(ERROR, 1)] if hit else []
+        errors = [(ERROR, 1)] if hit and hit != UNRESOLVED else []
         failed = criterion is not None and any(criterion.error_matches(text) for text, _ in errors)
-        outcome = CRASH if hit == CRASH else FAIL if failed else PASS
+        outcome = hit if hit in (CRASH, UNRESOLVED) else FAIL if failed else PASS
         trial = Trial(len(self.runs), label, list(mods), outcome, 1.0, errors=errors)
         self.trials.append(trial)
         return trial

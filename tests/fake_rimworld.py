@@ -26,7 +26,12 @@ def emit(kind, text=None):
 
 scenario = os.environ["FAKE_SCENARIO"]
 say("Mono path[0] = 'fake'")
-emit("started")
+running = os.environ.get("FAKE_RUNNING")
+emit("started", "\n".join(running.split(",")) if running else None)
+if scenario == "settings":
+    savedata = next(a for a in args if a.startswith("-savedatafolder=")).split("=", 1)[1]
+    with open(os.path.join(savedata, "Config", "Mod_Example_Settings.xml"), "w") as fh:
+        fh.write("changed by a mod")
 if scenario == "late_line":
     emit("map_ready")
     emit("done")
@@ -35,13 +40,15 @@ if scenario == "late_line":
     say("RIMBISECT_DONE")
     say("XML error: after the probe finished, so it does not count: rimbisectNoSuchField")
     sys.exit(0)
-if scenario in ("pass", "log_reset"):
+if scenario in ("pass", "log_reset", "settings", "paused"):
     emit("error", "Some unrelated error")
     if scenario == "log_reset":
         emit("log_reset")
     emit("map_ready")
     say("RIMBISECT_MAP_READY")
-    emit("done")
+    if scenario == "paused":
+        emit("closed", "HugsLib.News.Dialog_UpdateFeatures")
+    emit("done", "1200")
     say("RIMBISECT_DONE")
     sys.exit(0)
 if scenario == "error":

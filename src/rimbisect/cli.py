@@ -18,9 +18,9 @@ from . import __version__, report
 from .errors import UserError
 from .install import EXE_NAME, Game, default_config_dir, find_game, process_running
 from .modlist import PROBE_FOLDER, LoadOrder, ModsConfig, folder_mtime, read_mods_config, scan_mods
-from .search import Search
+from .search import Inconclusive, Search
 from .signature import Criterion, ErrorGroup, group_errors
-from .trial import CRASH, FAIL, PASS, GameLauncher, Trial, install_probe, remove_probe
+from .trial import CRASH, FAIL, PASS, UNRESOLVED, GameLauncher, Trial, install_probe, remove_probe
 
 
 def log(message: str) -> None:
@@ -51,9 +51,12 @@ def load(args) -> Setup:
 def _preflight(setup: Setup) -> None:
     if process_running(EXE_NAME):
         raise UserError("RimWorld is already running. Close it first; rimbisect starts and stops the game itself.")
-    if process_running("steam.exe") is False:
-        setup.warnings.append("Steam was not running, so the game could not see workshop mods")
-        log("warning: Steam is not running")
+    workshop = setup.game.workshop_dir
+    if workshop and process_running("steam.exe") is False:
+        count = sum(setup.order.mods[pid].folder.parent == workshop for pid in setup.order.order)
+        if count:
+            raise UserError(f"Steam is not running, and without it the game does not load your {count} "
+                            "Workshop mods. Start Steam and run rimbisect again.")
 
 
 @contextmanager
@@ -83,11 +86,14 @@ def _new_run(setup: Setup, args) -> tuple[Path, GameLauncher]:
 
 
 def _criterion(args) -> Criterion | None:
+    if args.match_text:
+        return Criterion(pattern=re.compile(re.escape(args.match_text)))
     if args.match:
         try:
             return Criterion(pattern=re.compile(args.match))
         except re.error as exc:
-            raise UserError(f"--match is not a valid regular expression: {exc}") from exc
+            raise UserError(f"--match is not a valid regular expression: {exc}; "
+                            "use --match-text to match the text as it is") from exc
     if args.slower_than is not None:
         return Criterion(slower_than=args.slower_than)
     return None
@@ -104,18 +110,18 @@ def _pick(groups: list[ErrorGroup], args) -> ErrorGroup:
     if len(groups) > len(shown):
         log(f"       ... and {len(groups) - len(shown)} rarer ones")
     if args.pick is not None:
-        choice = args.pick
-    elif sys.stdin.isatty():
+        if not 1 <= args.pick <= len(groups):
+            raise UserError(f"--pick {args.pick}: pick a number between 1 and {len(groups)}")
+        return groups[args.pick - 1]
+    if not sys.stdin.isatty():
+        raise UserError(NEED_PICK)
+    while True:
         try:
             answer = input(f"\nWhich error should rimbisect hunt? [1-{len(shown)}] ").strip()
         except EOFError:
             raise UserError(NEED_PICK) from None
-        choice = int(answer) if answer.isdigit() else 0
-    else:
-        raise UserError(NEED_PICK)
-    if not 1 <= choice <= len(groups):
-        raise UserError(f"pick a number between 1 and {len(groups)}")
-    return groups[choice - 1]
+        if answer.isdigit() and 1 <= int(answer) <= len(groups):
+            return groups[int(answer) - 1]
 
 
 def _keep(setup: Setup, extra: list[str]) -> set[str]:
@@ -179,17 +185,29 @@ def _baseline(launcher: GameLauncher, setup: Setup, criterion: Criterion | None,
     mods = setup.order.trial_list(setup.order.order)
     for attempt in range(max(1, args.repeats)):
         trial = launcher.run(mods, "baseline" if attempt == 0 else "baseline again", criterion)
+        if criterion is None:
+            break
         log(trial.line())
-        if trial.outcome == FAIL or criterion is None:
+        if _reproduced(trial, args):
             break
     return trial
+
+
+def _warn_not_loaded(trial: Trial, setup: Setup) -> None:
+    if trial.not_loaded:
+        names = ", ".join(setup.order.written(trial.not_loaded[:10]))
+        setup.warnings.append(f"the game did not load {len(trial.not_loaded)} of the active mods even with the "
+                              f"full list ({names}), so they are not tested")
+
+
+def _reproduced(trial: Trial, args) -> bool:
+    return trial.outcome == FAIL or (args.crash_is_fail and trial.outcome == CRASH)
 
 
 def _hunted(baseline: Trial, criterion: Criterion | None, args) -> Criterion | None:
     """The criterion to search with, or None when the baseline did not reproduce anything."""
     if criterion is not None:
-        reproduced = baseline.outcome == FAIL or (args.crash_is_fail and baseline.outcome == CRASH)
-        return criterion if reproduced else None
+        return criterion if _reproduced(baseline, args) else None
     if args.crash_is_fail and args.pick is None:
         return Criterion() if baseline.outcome == CRASH else None
     groups = group_errors(baseline.errors)
@@ -212,9 +230,10 @@ def cmd_bisect(args) -> int:
     setup = load(args)
     _preflight(setup)
     keep = _keep(setup, args.keep)
-    candidates = [pid for pid in setup.order.order if pid not in keep]
+    kept = setup.order.closure(keep)
+    candidates = [pid for pid in setup.order.order if pid not in kept]
     if not candidates:
-        raise UserError("every active mod is kept (Core, DLCs, --keep); there is nothing to search")
+        raise UserError("every active mod is kept (Core, DLCs, --keep and what they need); there is nothing to search")
     criterion = _criterion(args)
     log(f"rimbisect {__version__}: {len(setup.order.order)} active mods, {len(candidates)} to search")
     changed = _changed(setup, candidates, args)
@@ -223,36 +242,48 @@ def cmd_bisect(args) -> int:
 
     fields = dict(run_dir=run_dir, game=setup.game, config_path=setup.config_path, order=setup.order,
                   searched=len(candidates), warnings=setup.warnings, trials=launcher.trials,
-                  crash_is_fail=args.crash_is_fail)
+                  crash_is_fail=args.crash_is_fail, settle=args.settle)
     search: Search | None = None
     with _session(setup.game, launcher):
         try:
             baseline = _baseline(launcher, setup, criterion, args)
+            _warn_not_loaded(baseline, setup)
             hunted = _hunted(baseline, criterion, args)
+            if criterion is None:
+                # Only now is it known whether the picked error counts as a failure.
+                log(baseline.line())
             if hunted is None:
                 what = "the error" if criterion else "a crash" if args.crash_is_fail and args.pick is None else "any error"
-                setup.warnings.append(f"the full mod list did not reproduce {what} "
-                                      f"(baseline outcome {baseline.outcome})")
+                why = (baseline.excerpt.splitlines()[0] if baseline.outcome == UNRESOLVED and baseline.excerpt
+                       else f"baseline outcome {baseline.outcome}")
+                setup.warnings.append(f"the full mod list did not reproduce {what} ({why})")
                 _emit(report.build(status=report.NOT_REPRODUCED, criterion=criterion, **fields), run_dir, args.json)
                 return 1
             criterion = hunted
             steps = math.ceil(math.log2(len(candidates))) if len(candidates) > 1 else 0
             # Offsets measured with acceptance/simulate.py at 64, 200 and 400 mods.
-            log(f"the full list took {baseline.duration:.0f}s; expect about {steps + 2} more trials "
-                f"for a single culprit, {2 * steps + 3} for two mods that only fail together")
+            log(f"the full list took {baseline.duration:.0f}s; expect about {steps + 3} more trials "
+                f"for a single culprit, {2 * steps + 4} for two mods that only fail together")
             search = Search(setup.order, launcher, criterion, keep, repeats=args.repeats,
                             crash_is_fail=args.crash_is_fail, log=log)
             search.record(candidates, True)
-            culprits = search.locate(candidates, changed)
+            causes = search.locate_all(candidates, changed)
         except KeyboardInterrupt:
             log("interrupted; the game has been closed")
             _emit(report.build(status=report.INTERRUPTED, criterion=criterion, changed=changed,
                                flaky=search.flaky if search else None, **fields), run_dir, args.json)
             return 130
-    status = report.FOUND if culprits else report.BASE_GAME_FAILS
-    _emit(report.build(status=status, criterion=criterion, culprits=culprits, flaky=search.flaky,
-                       changed=changed, **fields), run_dir, args.json)
-    return 0 if culprits else 1
+        except Inconclusive as exc:
+            log(f"stopping: {exc}")
+            setup.warnings.append(f"{exc}. Its mod list is in report.json and the game's log in {exc.trial.log}; "
+                                  "if it timed out, a longer --timeout may get through")
+            _emit(report.build(status=report.INCONCLUSIVE, criterion=criterion, changed=changed,
+                               flaky=search.flaky, **fields), run_dir, args.json)
+            return 1
+    status = report.FOUND if causes else report.BASE_GAME_FAILS
+    _emit(report.build(status=status, criterion=criterion, causes=causes, base_fails=search.base_fails,
+                       flaky=search.flaky, changed=changed, **fields), run_dir, args.json)
+    return 0 if causes else 1
 
 
 def cmd_check(args) -> int:
@@ -268,13 +299,15 @@ def cmd_check(args) -> int:
             log("interrupted; the game has been closed")
             return 130
     log(trial.line())
+    _warn_not_loaded(trial, setup)
     passed = trial.outcome == PASS
     if passed:
         log(f"saved this mod list as the last good one: {_save_last_good(setup)}")
     status = report.CHECK_PASSED if passed else report.CHECK_FAILED
     _emit(report.build(status=status, run_dir=run_dir, game=setup.game, config_path=setup.config_path,
                        order=setup.order, criterion=criterion, trials=launcher.trials,
-                       errors=group_errors(trial.errors), warnings=setup.warnings), run_dir, args.json)
+                       errors=group_errors(trial.errors), settle=args.settle, warnings=setup.warnings),
+          run_dir, args.json)
     return 0 if passed else 1
 
 
@@ -319,10 +352,12 @@ def _parser() -> argparse.ArgumentParser:
     trial_opts = argparse.ArgumentParser(add_help=False)
     what = trial_opts.add_mutually_exclusive_group()
     what.add_argument("--match", metavar="REGEX", help="a trial fails when an error or log line matches REGEX")
+    what.add_argument("--match-text", metavar="TEXT",
+                      help="a trial fails when an error or log line contains TEXT, taken literally")
     what.add_argument("--slower-than", type=float, metavar="SECONDS",
                       help="a trial fails when the map takes longer than SECONDS to be ready")
     trial_opts.add_argument("--settle", type=float, default=20, metavar="SECONDS",
-                            help="how long to keep the map running before quitting (default 20)")
+                            help="game seconds to keep the map running before quitting (default 20)")
     trial_opts.add_argument("--timeout", type=float, default=20, metavar="MINUTES",
                             help="give up on a trial after this long (default 20)")
 
@@ -333,7 +368,7 @@ def _parser() -> argparse.ArgumentParser:
 
     bisect = sub.add_parser("bisect", parents=[common, trial_opts],
                             help="run the game on halves of your mod list until the culprit is found")
-    bisect.add_argument("--pick", type=int, metavar="N", help="hunt error N from the baseline's list without asking")
+    bisect.add_argument("--pick", type=int, metavar="N", help="hunt error N from the full list's errors without asking")
     bisect.add_argument("--keep", action="append", default=[], metavar="ID[,ID]",
                         help="packageIds to load in every trial (Core and DLCs always are)")
     bisect.add_argument("--since", metavar="DATE", help="first try the list without mods changed after DATE")

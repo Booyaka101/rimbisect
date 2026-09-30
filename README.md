@@ -9,20 +9,28 @@ wrong once dependencies are involved. rimbisect does the same halving for you. I
 launches the game on dependency-safe parts of your mod list, reads each run's log,
 closes the game and narrows down, until it can name the mod.
 
-It never writes to your real mod list, settings or saves. It never reorders your mods.
+It never writes to your real mod list, settings or saves, and never reorders your mods.
+The only thing it puts in the game folder is a small helper mod, `Mods\rimbisect-probe`,
+which it deletes when the run ends.
 
 ## Install
 
+You need Windows, RimWorld 1.6 from Steam, and Python 3.11 or newer. If you don't have
+Python, get it from [python.org](https://www.python.org/downloads/) and tick "Add
+python.exe to PATH" in the installer. Then, in PowerShell:
+
 ```
-pipx install rimbisect
+py -m pip install rimbisect
 ```
 
-or `pip install rimbisect`. Needs Windows, Python 3.11 or newer, and RimWorld 1.6 from
-Steam.
+If `rimbisect` is then "not recognized", Python's Scripts folder isn't on your PATH;
+`py -m rimbisect` works the same everywhere. With pipx, `pipx install rimbisect` does it
+in one go.
 
 ## Use it
 
-Close RimWorld, keep Steam running, and start a bisect:
+Close RimWorld, make sure Steam is running (the game only loads Workshop mods through
+it), and start a bisect:
 
 ```
 rimbisect bisect
@@ -31,31 +39,38 @@ rimbisect bisect
 rimbisect finds your install through Steam and takes the mod list you have active in the
 game. It first runs your full list once and shows the errors it logged, grouped and
 numbered. Type the number of the one you want gone, then leave it. The game opens and
-closes on its own for every trial; don't click in it.
+closes on its own for every trial; don't click in it, and don't use the PC for games
+meanwhile. Expect 10 to 20 trials, each one a game start. A 200 mod list took 12 minutes
+on a fast PC; count on two to three times as long as your full list takes to load into a
+map.
 
-If you already know what the error says, skip the question:
+If you already know what the error says, skip the question. `--match-text` takes a piece
+of the error as you see it in the log; `--match` takes a regular expression:
 
 ```
-rimbisect bisect --match "doesn't correspond to any field"
+rimbisect bisect --match-text "doesn't correspond to any field"
 ```
 
 This is a real run on a 200 mod list with a test mod that has a broken def at position
-150. Progress goes to the terminal as it happens:
+150 (made for testing with `--config`, which is why the paths are in a repo; yours go
+to `%LOCALAPPDATA%\rimbisect\runs`). Progress goes to the terminal as it happens:
 
 ```
 rimbisect 0.1.0: 200 active mods, 194 to search
-run folder D:\Repos\ideas\rimbisect\acceptance\work\rb\runs\2026-09-30_09-25-24
-trial   1  baseline                200 mods  FAIL         98.7s
-trial   2  bisect                  103 mods  PASS        116.3s
+run folder D:\Repos\ideas\rimbisect\acceptance\work\rb\runs\2026-09-30_11-53-13
+trial   1  baseline                200 mods  FAIL         65.4s
+the full list took 65s; expect about 11 more trials for a single culprit, 20 for two mods that only fail together
+trial   2  bisect                  103 mods  PASS         96.3s
 trial   3  bisect                   57 mods  FAIL          8.3s
-trial   4  bisect                   31 mods  PASS         38.8s
-trial   5  bisect                   23 mods  PASS         61.8s
-trial   6  bisect                   20 mods  FAIL          5.1s
-trial   7  bisect                   13 mods  PASS         35.2s
-trial   8  bisect                   11 mods  PASS         33.7s
-trial   9  bisect                   11 mods  FAIL          4.8s
-trial  10  bisect                    9 mods  PASS         38.7s
+trial   4  bisect                   31 mods  PASS         42.3s
+trial   5  bisect                   23 mods  PASS         54.8s
+trial   6  bisect                   20 mods  FAIL          4.8s
+trial   7  bisect                   13 mods  PASS         34.7s
+trial   8  bisect                   11 mods  PASS         34.5s
+trial   9  bisect                   11 mods  FAIL          4.6s
+trial  10  bisect                    9 mods  PASS         38.5s
 trial  11  bisect                    7 mods  FAIL          2.8s
+trial  12  without the culprits    199 mods  PASS        319.6s
 ```
 
 and the report at the end:
@@ -66,30 +81,39 @@ rimbisect 0.1.0   found the mods that cause the error
 game        D:\SteamLibrary\steamapps\common\RimWorld (1.6.4871 rev590)
 mod list    D:\Repos\ideas\rimbisect\acceptance\work\ModsConfig-200.xml (200 active, 194 searched)
 error       log matches /rimbisectNoSuchField/
-run folder  D:\Repos\ideas\rimbisect\acceptance\work\rb\runs\2026-09-30_09-25-24
+run folder  D:\Repos\ideas\rimbisect\acceptance\work\rb\runs\2026-09-30_11-53-13
 
 CULPRIT  rimbisect acceptance: broken def  (rimbisect.acceptance.brokendef)
-  workshop id  -
+  workshop     -
   folder       D:\SteamLibrary\steamapps\common\RimWorld\Mods\rimbisect-acceptance-brokendef
   modified     2026-09-30T09:23:26
 
 Your mod list without 1 mod:
-  D:\Repos\ideas\rimbisect\acceptance\work\rb\runs\2026-09-30_09-25-24\ModsConfig.fixed.xml
+  D:\Repos\ideas\rimbisect\acceptance\work\rb\runs\2026-09-30_11-53-13\ModsConfig.fixed.xml
+note: the probe closed windows that paused the game in trials 2, 12: Dialog_ModFeatures, Dialog_UpdateFeatures
 
-TRIALS  11 runs, 7m24s total
+TRIALS  12 runs, 11m47s total
 
    #  label                    mods  outcome        time
-   1  baseline                  200  FAIL          98.7s
+   1  baseline                  200  FAIL          65.4s
           | XML error: <rimbisectNoSuchField>1</rimbisectNoSuchField> doesn't correspond to any field in type ThingCategoryDef. Context: <ThingCategoryDef><def...
-   2  bisect                    103  PASS         116.3s
+   2  bisect                    103  PASS          96.3s
    ...
 ```
 
-Six of the 200 mods (Core, the five DLCs) are always loaded, so 194 were searched. The run
-folder keeps `report.txt`, `report.json`, the fixed mod list and every trial's log.
+Trial 12 is the check at the end: the full list without the culprit, which no longer
+shows the error. The note is real too: those two windows come from HugsLib and from
+Achtung and Camera+ in the list, and would otherwise have kept the game paused.
 
-To use the fixed list, copy `ModsConfig.fixed.xml` over the `ModsConfig.xml` in your
-config folder (back that up first), or just disable the culprit in the game.
+Six of the 200 mods (Core, the five DLCs) are always loaded, so 194 were searched. The run
+folder keeps `report.txt`, `report.json`, the fixed mod list and every trial's log. Old
+run folders are safe to delete.
+
+The simplest fix is to disable the culprit in the game's mod manager. The fixed list is
+your list without the culprits and without the mods that need them; to use it, close
+RimWorld, back up `ModsConfig.xml` in
+`%USERPROFILE%\AppData\LocalLow\Ludeon Studios\RimWorld by Ludeon Studios\Config`, and copy
+`ModsConfig.fixed.xml` over it. To undo, put the backup back.
 
 ## What counts as the error
 
@@ -98,64 +122,95 @@ A trial fails when:
 - the error you picked from the full list's log shows up again (the default). Numbers,
   hex ids and quoted names are masked before comparing, so the same error from a
   different pawn still counts.
-- a log line or error matches `--match REGEX`.
+- a log line or error contains `--match-text TEXT`, or matches `--match REGEX`.
 - the map takes longer than `--slower-than SECONDS` to be ready, for slow starts.
 - the game crashes, exits early or gives up on the map, with `--crash-is-fail`. Without
-  it those trials are reported as CRASH and treated as passing.
+  it those trials are reported as CRASH, run again once (big lists do crash now and then
+  for no repeatable reason), and treated as passing if the game crashes again. With it
+  and without `--match`, `--match-text` or `--pick`, the crash itself is what rimbisect
+  hunts.
 
-A trial passes when the map has been running for `--settle` seconds (20 by default)
-without the error. Raise it if your error only shows up a while into the game. If the
-full list does not reproduce the error, rimbisect says so and stops.
+Only one of `--match`, `--match-text` and `--slower-than` can be given.
+
+A trial passes when the map has run for `--settle` seconds of game time (20 by default)
+without the error. Raise it if your error only shows up a while into the game. A PC that
+runs the game too slowly to get there still stops after three times as long in real time
+(at least a minute), and the report points out trials that got through less than half of
+it. If the full list does not reproduce the error, rimbisect says so and stops.
+
+During the search, a trial that gives no answer, because it hit `--timeout` or the game
+did not load all the mods it was given, is run again once. If the same list gives no
+answer twice, rimbisect stops with the status "inconclusive" and says which list it was.
 
 ## How long it takes
 
 Every trial is a full game start, so time depends on your PC and the size of the list.
-On the run above (an i9-14900K, game on an NVMe SSD, RimWorld 1.6.4871) a list of about
-100 mods took just under 2 minutes to get through a settled map, and trials under 30
-mods took 30 to 60 seconds. A failing trial is often much quicker: the run stops the
-moment the error appears, and def errors appear before the map is generated.
+On the run above (an i9-14900K, game on an NVMe SSD, RimWorld 1.6.4871) the full 199 mod
+list took 5 minutes to reach a map and run it for 20 game seconds, a list of about 100
+mods took a minute and a half, and trials under 30 mods took 35 to 55 seconds. A failing
+trial is often much quicker: the run stops the moment the error appears, and def errors
+appear before the map is generated.
 
-Trials needed after the first full run, measured with `acceptance/simulate.py` over every
+Trials needed after the first full run, measured with
+[`acceptance/simulate.py`](https://github.com/Booyaka101/rimbisect/blob/main/acceptance/simulate.py) over every
 single culprit and 300 random pairs:
 
 | mods | one culprit | two mods that only fail together |
 | ---: | --- | --- |
-| 64  | 7.6 on average, at most 10 | 15.2 on average, at most 20 |
-| 200 | 9.6 on average, at most 12 | 18.9 on average, at most 25 |
-| 400 | 10.7 on average, at most 14 | 21.4 on average, at most 27 |
+| 64  | 8.6 on average, at most 11 | 16.2 on average, at most 21 |
+| 200 | 10.6 on average, at most 13 | 19.9 on average, at most 26 |
+| 400 | 11.7 on average, at most 15 | 22.4 on average, at most 28 |
 
-The real 200 mod run above needed 10. For 400 mods, count on about 11 trials plus the
-full run. The first trials load half the list and take longest, so a single culprit in
-400 mods should take somewhere around 15 to 25 minutes on a PC like this one. That is an
+The real 200 mod run above needed 11, as the estimate after the full run said. For 400
+mods, count on about 12 trials plus the full run. The first trials load half the list and
+the last one nearly all of it, so they take most of the time; a single culprit in 400
+mods should take somewhere around 25 to 40 minutes on a PC like this one. That is an
 estimate from the 200 mod timings, not a measurement.
 
 ## How it works
 
-- **Isolation.** Each trial runs the game with `-savedatafolder` pointing at
-  the run folder, which holds a copy of your `Config` folder (mod settings included) and
-  the trial's mod list. The copy is deleted when the run ends. Your `ModsConfig.xml`,
-  `Prefs.xml` and saves are only read.
-- **A probe mod.** rimbisect copies a small mod, `rimbisect-probe`, into the game's
-  `Mods` folder for the run and deletes it afterwards, also on Ctrl+C. It loads last,
-  writes errors and progress to a file rimbisect watches, and closes the game once the
-  map has settled. RimWorld stops logging after 10,000 messages, which a big list can
-  reach while loading; the probe switches logging back on so a later error is still
-  seen. It has no Harmony patches and does nothing when rimbisect did not start the
-  game. If rimbisect is killed hard, delete `Mods\rimbisect-probe` yourself.
-- **Dependencies are respected.** Every trial includes the mods that the mods under test
-  need, so there are no "missing dependency" errors that the full list doesn't have.
-  Missing dependencies are never invented; rimbisect warns about them instead.
-- **Load order is kept.** A trial is your list with some mods left out, never reordered.
-- **Interactions.** When neither half fails on its own, it narrows each half with the
-  other one loaded. Two or three mods that only break together come out as a set.
-- **Changed mods first.** `rimbisect check` runs your full list once and, if it gets
-  through, remembers it as the last good state. The next bisect first tries the list
-  without the mods whose folders changed since then (updates, new mods). `--since DATE`
-  does the same without a check.
-- **Flaky errors.** With `--repeats N`, a list that passes is run again, up to N times,
-  before it is trusted. Lists that gave different results are listed in the report.
+Each trial runs the game with `-savedatafolder` pointing at the run folder, which holds a
+copy of your `Config` folder (mod settings included), HugsLib's settings and the trial's
+mod list. The copy is made again before every trial, so a setting one trial changes
+doesn't leak into the next, and it is deleted when the run ends. The copied `Prefs.xml`
+runs the game in a 1280x720 window with the sound off and the UI scale at 1. Your own
+`ModsConfig.xml` and `Prefs.xml` are only read, and your saves are never opened.
 
-rimbisect only kills the game process it started, by process id.
+For the run, rimbisect copies a small mod, `rimbisect-probe`, into the game's `Mods`
+folder and deletes it afterwards, also on Ctrl+C. It loads last, writes errors and
+progress to a file rimbisect watches, and closes the game once the map has settled.
+RimWorld stops logging for good after 10,000 messages, which a big list can reach while
+loading. The probe keeps the game's count from getting there, and switches logging back
+on if it was reached before the probe loaded, so a later error is still seen. It also
+reports which mods the game actually loaded; if a trial is missing some (usually because
+Steam was closed mid-run), it counts as no answer rather than a pass. Windows that pause
+a new game, like HugsLib's update news or the feature popups of Achtung and Camera+, are
+closed so the map actually runs; the report says which ones. It has no Harmony
+patches and does nothing when rimbisect did not start the game. If rimbisect is killed
+hard, delete `Mods\rimbisect-probe` yourself or let the next run replace it.
+
+Every trial includes the mods that the mods under test need, so there are no "missing
+dependency" errors that the full list doesn't have. Missing dependencies are never
+invented; rimbisect warns about them instead, and about pairs of active mods that say
+they are incompatible. A trial is your list with some mods left out, never reordered.
+Mods given with `--keep` are loaded in every trial, together with what they need.
+
+When neither half fails on its own, rimbisect narrows each half with the other one
+loaded, so two or three mods that only break together come out as a set.
+
+Once it has a culprit, rimbisect runs the list once more without it and the mods that
+need it. If the error is still there, something else causes it too, and the search goes
+on through the rest. The report lists each cause on its own.
+
+`rimbisect check` runs your full list once and, if it gets through, remembers it as the
+last good state. The next bisect first tries the list without the mods whose folders
+changed since then (updates, new mods). `--since DATE` does the same without a check.
+
+For errors that come and go, `--repeats N` runs a passing list again, up to N times,
+before trusting it. Lists that gave different results are listed in the report.
+
+rimbisect only kills the game process it started, by process id. The game runs in a
+Windows job object, so it also closes if rimbisect is killed or its window is closed.
 
 ## Commands
 
@@ -165,16 +220,29 @@ rimbisect only kills the game process it started, by process id.
 | `rimbisect check` | Run the full list once; if it gets through, save it as the last good state |
 | `rimbisect mods` | Show the mod list the way rimbisect reads it, with warnings |
 
+Every command takes these:
+
 | Option | |
 | --- | --- |
 | `--game PATH` | RimWorld install folder. Found through Steam if omitted |
 | `--config FILE` | `ModsConfig.xml` to test instead of the game's own. Only read |
 | `--workdir PATH` | Where runs and `last-good.json` go. Default `%LOCALAPPDATA%\rimbisect` |
 | `--json` | Print the report as JSON |
+
+`bisect` and `check` also take these:
+
+| Option | |
+| --- | --- |
 | `--match REGEX` | Fail when an error or log line matches |
+| `--match-text TEXT` | Fail when an error or log line contains TEXT, taken literally |
 | `--slower-than SECONDS` | Fail when the map is not ready after this long |
-| `--settle SECONDS` | How long a map has to run without the error to pass. Default 20 |
+| `--settle SECONDS` | Game seconds a map has to run without the error to pass. Default 20 |
 | `--timeout MINUTES` | Give up on a single trial after this long. Default 20 |
+
+and `bisect` these:
+
+| Option | |
+| --- | --- |
 | `--pick N` | Hunt error N from the full list's errors without asking |
 | `--keep ID[,ID]` | Load these packageIds in every trial. Core and DLCs always are |
 | `--since DATE` | First try the list without mods changed after DATE, like `2026-09-01` |
@@ -182,9 +250,12 @@ rimbisect only kills the game process it started, by process id.
 | `--repeats N` | Run a passing list up to N times, for errors that come and go |
 | `--crash-is-fail` | Count a crash, early exit or failed map as the problem |
 
+`rimbisect --version` prints the version.
+
 Exit codes: 0 when culprits were found (or `check` passed), 1 when the full list did not
-reproduce the error, the base game alone fails, or `check` failed, 2 for usage errors
-such as a missing install or RimWorld already running, 130 when interrupted.
+reproduce the error, the base game alone fails, a trial gave no answer twice, or `check`
+failed, 2 for usage errors such as a missing install or RimWorld already running, 130
+when interrupted.
 
 ## Limitations
 
@@ -192,6 +263,8 @@ such as a missing install or RimWorld already running, 130 when interrupted.
 - It finds errors that happen while the game starts and during the first `--settle`
   seconds on a fresh map. Problems that need your save, a raid or a year of play are out
   of reach.
+- Settings of mods that keep them outside `Config` (other than HugsLib) are not copied,
+  so those mods run with their defaults.
 - A problem that depends on load order, rather than on which mods are present, is only
   found as the set of mods involved. rimbisect does not try other orders.
 - RimWorld has to be closed while it runs, and the machine is busy the whole time.

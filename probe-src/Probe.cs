@@ -1,4 +1,6 @@
 using System;
+using System.Collections.Generic;
+using System.Globalization;
 using System.IO;
 using System.Linq;
 using System.Reflection;
@@ -17,15 +19,13 @@ namespace RimbisectProbe
         public static readonly string EventsPath = Environment.GetEnvironmentVariable("RIMBISECT_EVENTS");
         public static bool Active => !string.IsNullOrEmpty(EventsPath);
 
-        public static float Settle
+        public static readonly float Settle = ReadSettle();
+
+        private static float ReadSettle()
         {
-            get
-            {
-                float value;
-                string raw = Environment.GetEnvironmentVariable("RIMBISECT_SETTLE");
-                return float.TryParse(raw, System.Globalization.NumberStyles.Float,
-                    System.Globalization.CultureInfo.InvariantCulture, out value) ? value : 20f;
-            }
+            float value;
+            string raw = Environment.GetEnvironmentVariable("RIMBISECT_SETTLE");
+            return float.TryParse(raw, NumberStyles.Float, CultureInfo.InvariantCulture, out value) ? value : 20f;
         }
 
         private static readonly object Gate = new object();
@@ -34,8 +34,13 @@ namespace RimbisectProbe
         private static bool gaveUp;
         private static Timer watchdog;
 
+        private static StreamWriter events;
+        private static int messagesSeen;
+
         private static readonly FieldInfo LogCapped =
             typeof(Log).GetField("reachedMaxMessagesLimit", BindingFlags.NonPublic | BindingFlags.Static);
+        private static readonly FieldInfo LogCount =
+            typeof(Log).GetField("messageCount", BindingFlags.NonPublic | BindingFlags.Static);
 
         // Titles of the dialogs the game shows when it abandons map generation or loading.
         private static readonly string[] GiveUpTitleKeys =
@@ -70,7 +75,8 @@ namespace RimbisectProbe
             {
                 Emit("error", "rimbisect probe: could not read the errors logged before it loaded", 1);
             }
-            Emit("started", null, 1);
+            Emit("started", string.Join("\n", LoadedModManager.RunningModsListForReading.Select(m => m.PackageId)), 1);
+            HoldOffLogCap();
             KeepLogging();
         }
 
@@ -81,7 +87,21 @@ namespace RimbisectProbe
         }
 
         // After 10,000 messages RimWorld stops logging until someone clears the debug log, so
-        // an error that comes after a flood of unrelated ones would never be seen.
+        // an error that comes after a flood of unrelated ones would never be seen. Its counter
+        // is set back every 5,000 messages so it never gets there; KeepLogging switches
+        // logging back on if it did anyway.
+        private static void HoldOffLogCap()
+        {
+            try
+            {
+                LogCount?.SetValue(null, 0);
+            }
+            catch (Exception)
+            {
+                // KeepLogging still catches the cap, half a second late.
+            }
+        }
+
         private static void KeepLogging()
         {
             try
@@ -154,6 +174,10 @@ namespace RimbisectProbe
 
         private static void OnLog(string condition, string stackTrace, LogType type)
         {
+            if (Interlocked.Increment(ref messagesSeen) % 5000 == 0)
+            {
+                HoldOffLogCap();
+            }
             if (type == LogType.Exception)
             {
                 Emit("error", condition + "\n" + stackTrace, 1);
@@ -185,11 +209,18 @@ namespace RimbisectProbe
             {
                 try
                 {
-                    File.AppendAllText(EventsPath, line.ToString(), new UTF8Encoding(false));
+                    if (events == null)
+                    {
+                        var stream = new FileStream(EventsPath, FileMode.Append, FileAccess.Write,
+                            FileShare.ReadWrite | FileShare.Delete);
+                        events = new StreamWriter(stream, new UTF8Encoding(false)) { AutoFlush = true };
+                    }
+                    events.Write(line.ToString());
                 }
                 catch (Exception)
                 {
                     // Nowhere left to report this; rimbisect notices the missing events.
+                    events = null;
                 }
             }
         }
@@ -242,33 +273,71 @@ namespace RimbisectProbe
     public class ProbeMapComponent : MapComponent
     {
         private float readyAt = -1f;
+        private int ticks;
         private bool done;
+        private readonly HashSet<string> closed = new HashSet<string>();
 
         public ProbeMapComponent(Map map) : base(map)
         {
         }
 
-        public override void FinalizeInit()
+        public override void MapComponentTick()
         {
-            if (!Probe.Active || readyAt >= 0f)
+            if (readyAt >= 0f)
+            {
+                ticks++;
+            }
+        }
+
+        // Settle is game time, since that is what mods' tick errors need; a game too slow to
+        // get there still ends after three times as long in real time.
+        public override void MapComponentUpdate()
+        {
+            if (!Probe.Active || done)
             {
                 return;
             }
-            readyAt = Time.realtimeSinceStartup;
-            Log.Message("RIMBISECT_MAP_READY");
-            Probe.Emit("map_ready", null, 1);
-        }
-
-        public override void MapComponentUpdate()
-        {
-            if (readyAt < 0f || done || Time.realtimeSinceStartup - readyAt < Probe.Settle)
+            if (readyAt < 0f)
             {
+                readyAt = Time.realtimeSinceStartup;
+                Log.Message("RIMBISECT_MAP_READY");
+                Probe.Emit("map_ready", null, 1);
+                return;
+            }
+            if (ticks < Probe.Settle * 60f && Time.realtimeSinceStartup - readyAt < Math.Max(60f, Probe.Settle * 3f))
+            {
+                KeepPlaying();
                 return;
             }
             done = true;
             Log.Message("RIMBISECT_DONE");
-            Probe.Emit("done", null, 1);
+            Probe.Emit("done", ticks.ToString(CultureInfo.InvariantCulture), 1);
             Root.Shutdown();
+        }
+
+        // Some mods open a window that pauses the game on a new colony, or start it paused,
+        // and nobody is there to close it. Settle would then pass with no game time at all.
+        private void KeepPlaying()
+        {
+            TickManager time = Find.TickManager;
+            if (!time.Paused)
+            {
+                return;
+            }
+            foreach (Window window in Find.WindowStack.Windows.Where(w => w.forcePause).ToList())
+            {
+                string name = window.GetType().FullName;
+                if (closed.Add(name))
+                {
+                    Log.Message("RIMBISECT_CLOSED " + name);
+                    Probe.Emit("closed", name, 1);
+                }
+                Find.WindowStack.TryRemove(window, false);
+            }
+            if (time.CurTimeSpeed == TimeSpeed.Paused)
+            {
+                time.CurTimeSpeed = TimeSpeed.Normal;
+            }
         }
     }
 }

@@ -6,8 +6,9 @@ import pytest
 
 from fakegame import FakeGame, write_mod
 from rimbisect import cli
+from rimbisect.install import Game
 from rimbisect.modlist import PROBE_FOLDER
-from rimbisect.trial import CRASH
+from rimbisect.trial import CRASH, UNRESOLVED
 
 
 @pytest.fixture
@@ -86,12 +87,89 @@ def test_interaction_is_reported_as_a_combination(env, capsys):
     assert any("all of these mods" in note for note in data["notes"])
 
 
+def test_separate_causes_are_reported_as_such(env, capsys):
+    env["rule"] = lambda mods: "m04" in mods or "m13" in mods
+    assert cli.main(["bisect", *env["args"], "--match", "cross-reference"]) == 0
+    out = capsys.readouterr().out
+    data, run = reports(env)
+    assert sorted((c["cause"], c["packageId"]) for c in data["culprits"]) in ([(1, "m04"), (2, "m13")],
+                                                                              [(1, "m13"), (2, "m04")])
+    assert "CAUSE 1  CULPRIT" in out and "CAUSE 2  CULPRIT" in out
+    assert any("2 separate causes" in note for note in data["notes"])
+    fixed = (run / "ModsConfig.fixed.xml").read_text()
+    assert "<li>m04</li>" not in fixed and "<li>m13</li>" not in fixed
+
+
+def test_keep_takes_what_the_kept_mods_need(env, capsys):
+    env["rule"] = lambda mods: "m02" in mods
+    assert cli.main(["bisect", *env["args"], "--match", "cross-reference", "--keep", "m09"]) == 1
+    assert "14 to search" in capsys.readouterr().err
+    data, _ = reports(env)
+    assert data["status"] == "base_game_fails" and "--keep and what they need" in data["summary"]
+
+
+def test_a_list_that_times_out_twice_ends_the_search(env, capsys):
+    env["rule"] = lambda mods: UNRESOLVED if "m05" in mods and len(mods) < 12 else "m11" in mods
+    assert cli.main(["bisect", *env["args"], "--match", "cross-reference"]) == 1
+    data, _ = reports(env)
+    assert data["status"] == "inconclusive"
+    assert any("gave no answer twice" in w for w in data["warnings"])
+
+
+def test_a_baseline_crash_counts_at_once_under_crash_is_fail(env, capsys):
+    env["rule"] = lambda mods: CRASH if "m11" in mods else False
+    args = ["bisect", *env["args"], "--match", "nothing like this", "--crash-is-fail", "--repeats", "3"]
+    assert cli.main(args) == 0
+    data, _ = reports(env)
+    assert [t["label"] for t in data["trials"]].count("baseline again") == 0
+    assert [c["packageId"] for c in data["culprits"]] == ["m11"]
+
+
 def test_signature_mode_with_pick(env, capsys):
     assert cli.main(["bisect", *env["args"], "--pick", "1"]) == 0
     data, _ = reports(env)
     assert data["criterion"]["kind"] == "signature"
     assert data["trials"][0]["outcome"] == "FAIL"
     assert [c["packageId"] for c in data["culprits"]] == ["m11"]
+
+
+def test_signature_mode_shows_the_baseline_as_failing_once_picked(env, capsys):
+    assert cli.main(["bisect", *env["args"], "--pick", "1"]) == 0
+    baseline = [line for line in capsys.readouterr().err.splitlines() if "baseline" in line]
+    assert len(baseline) == 1 and " FAIL " in baseline[0]
+
+
+def test_asks_again_after_a_bad_answer(env, capsys, monkeypatch):
+    answers = iter(["x", "", "99", "1"])
+    monkeypatch.setattr("sys.stdin.isatty", lambda: True)
+    monkeypatch.setattr("builtins.input", lambda prompt: next(answers))
+    assert cli.main(["bisect", *env["args"]]) == 0
+    data, _ = reports(env)
+    assert [c["packageId"] for c in data["culprits"]] == ["m11"]
+
+
+def test_pick_out_of_range(env, capsys):
+    assert cli.main(["bisect", *env["args"], "--pick", "2"]) == 2
+    assert "between 1 and 1" in capsys.readouterr().err
+
+
+def test_match_text_is_taken_literally(env, capsys):
+    assert cli.main(["bisect", *env["args"], "--match-text", "Widget_12 (wanter=thingDef)"]) == 0
+    data, _ = reports(env)
+    assert [c["packageId"] for c in data["culprits"]] == ["m11"]
+
+
+def test_workshop_mods_need_steam(env, capsys, monkeypatch):
+    monkeypatch.setattr(Game, "workshop_dir", property(lambda self: self.root / "Mods"))
+    monkeypatch.setattr(cli, "process_running", lambda image: False)
+    assert cli.main(["bisect", *env["args"], "--match", "cross-reference"]) == 2
+    assert "Steam is not running" in capsys.readouterr().err
+    assert not (env["work"] / "runs").exists()
+
+
+def test_local_mods_do_not_need_steam(env, capsys, monkeypatch):
+    monkeypatch.setattr(cli, "process_running", lambda image: False)
+    assert cli.main(["bisect", *env["args"], "--match", "cross-reference"]) == 0
 
 
 def test_signature_mode_needs_pick_when_not_interactive(env, capsys):
@@ -186,7 +264,7 @@ def test_user_errors(env, tmp_path, capsys):
     assert "already running" in capsys.readouterr().err
     env["running"].clear()
     assert cli.main(["bisect", *env["args"], "--match", "(unclosed"]) == 2
-    assert "not a valid regular expression" in capsys.readouterr().err
+    assert "--match-text" in capsys.readouterr().err
     assert not (env["work"] / "runs").exists()
     assert cli.main(["mods", "--game", str(tmp_path)]) == 2
     assert "does not contain RimWorldWin64.exe" in capsys.readouterr().err

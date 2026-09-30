@@ -12,7 +12,7 @@ requires-python = ">=3.11"
 authors = [{ name = "Christiaan Bosch", email = "cbosch101@gmail.com" }]
 keywords = ["rimworld", "mods", "bisect", "modding", "load-order", "debugging", "troubleshooting"]
 classifiers = [
-    "Development Status :: 4 - Beta",
+    "Development Status :: 3 - Alpha",
     "Environment :: Console",
     "Intended Audience :: End Users/Desktop",
     "License :: OSI Approved :: MIT License",

@@ -1,6 +1,7 @@
 import re
 import subprocess
 import sys
+import time
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -11,6 +12,8 @@ from rimbisect.install import Game
 from rimbisect.modlist import CORE, PROBE_ID, ModsConfig
 from rimbisect.signature import Criterion
 from rimbisect.trial import CRASH, FAIL, PASS, UNRESOLVED, GameLauncher, prepare_savedata
+
+SRC = Path(__file__).resolve().parents[1] / "src"
 
 FAKE = Path(__file__).with_name("fake_rimworld.py")
 
@@ -32,8 +35,10 @@ def launcher(tmp_path, monkeypatch):
     (real / "ModsConfig.xml").write_text("the player's own list")
     (real / "Prefs.xml").write_text("<PrefsData><runInBackground>False</runInBackground><devMode>True</devMode></PrefsData>")
     (real / "Mod_Example_Settings.xml").write_text("settings")
+    (tmp_path / "HugsLib").mkdir()
+    (tmp_path / "HugsLib" / "ModSettings.xml").write_text("hugslib settings")
     monkeypatch.setenv("FAKE_PID_FILE", str(tmp_path / "pid"))
-    config = ModsConfig("1.6.4871 rev590", [], [])
+    config = ModsConfig("1.5.4409 rev1118", [], [])
     launcher = GameLauncher(BatchGame(root, "1.6.4871 rev590"), config, tmp_path / "run", real,
                             settle=1, timeout=20, poll=0.05, log=lambda _: None)
     (tmp_path / "run").mkdir(exist_ok=True)
@@ -46,7 +51,10 @@ def run(launcher, monkeypatch, scenario, criterion=CRITERION):
 
 
 def still_running(pid_file: Path) -> bool:
-    pid = pid_file.read_text()
+    return alive(pid_file.read_text())
+
+
+def alive(pid: str) -> bool:
     out = subprocess.run(["tasklist", "/FI", f"PID eq {pid}", "/NH"], capture_output=True, text=True).stdout
     return pid in out
 
@@ -56,12 +64,15 @@ def test_pass_writes_an_isolated_config(launcher, monkeypatch, tmp_path):
     assert trial.outcome == PASS
     assert trial.map_ready is not None
     assert trial.errors == [("Some unrelated error", 1)]
-    assert trial.mod_count == 2
+    assert trial.mod_count == 2 and trial.ticks == 1200
     config = launcher.savedata / "Config"
-    assert "<li>author.mod</li>" in (config / "ModsConfig.xml").read_text(encoding="utf-8")
+    mods_config = (config / "ModsConfig.xml").read_text(encoding="utf-8")
+    assert "<li>author.mod</li>" in mods_config and "<version>1.6.4871 rev590</version>" in mods_config
+    assert (launcher.savedata / "HugsLib" / "ModSettings.xml").read_text() == "hugslib settings"
     assert (config / "Mod_Example_Settings.xml").read_text() == "settings"
     prefs = (config / "Prefs.xml").read_text(encoding="utf-8")
     assert "<runInBackground>True</runInBackground>" in prefs and "<devMode>True</devMode>" in prefs
+    assert "<uiScale>1</uiScale>" in prefs
     assert (tmp_path / "Config" / "ModsConfig.xml").read_text() == "the player's own list"
     assert "<runInBackground>False</runInBackground>" in (tmp_path / "Config" / "Prefs.xml").read_text()
 
@@ -105,6 +116,11 @@ def test_log_resets_are_counted(launcher, monkeypatch):
     assert trial.outcome == PASS and trial.log_resets == 1
 
 
+def test_windows_the_probe_closed_are_recorded(launcher, monkeypatch):
+    trial = run(launcher, monkeypatch, "paused")
+    assert trial.outcome == PASS and trial.closed == ["HugsLib.News.Dialog_UpdateFeatures"]
+
+
 def test_empty_prefs_is_replaced(launcher, tmp_path):
     (tmp_path / "Config" / "Prefs.xml").write_text("")
     prepare_savedata(tmp_path / "Config", launcher.savedata)
@@ -114,6 +130,7 @@ def test_empty_prefs_is_replaced(launcher, tmp_path):
 def test_exit_without_done_is_a_crash(launcher, monkeypatch):
     trial = run(launcher, monkeypatch, "exit")
     assert trial.outcome == CRASH
+    assert trial.excerpt.splitlines()[0] == "the game exited early with code 1"
     assert "Crash!!!" in trial.excerpt
 
 
@@ -123,6 +140,53 @@ def test_timeout(launcher, monkeypatch, tmp_path):
     assert trial.outcome == UNRESOLVED
     assert "no result after 1s" in trial.excerpt
     assert not still_running(tmp_path / "pid")
+
+
+def test_settings_a_mod_changed_are_put_back_for_the_next_trial(launcher, monkeypatch):
+    run(launcher, monkeypatch, "settings")
+    settings = launcher.savedata / "Config" / "Mod_Example_Settings.xml"
+    assert settings.read_text() == "changed by a mod"
+    run(launcher, monkeypatch, "pass")
+    assert settings.read_text() == "settings"
+
+
+def test_mods_the_game_did_not_load(launcher, monkeypatch):
+    monkeypatch.setenv("FAKE_RUNNING", f"{CORE},{PROBE_ID}")
+    first = run(launcher, monkeypatch, "pass")
+    assert first.outcome == PASS and first.not_loaded == ["author.mod"]
+    assert run(launcher, monkeypatch, "pass").outcome == PASS  # the same mod missing again is normal
+    monkeypatch.setenv("FAKE_RUNNING", PROBE_ID)
+    third = run(launcher, monkeypatch, "pass")
+    assert third.outcome == UNRESOLVED
+    assert "did not load 1 of the mods it was given (ludeon.rimworld)" in third.excerpt
+
+
+def test_an_error_from_a_list_the_game_did_not_load_is_no_answer(launcher, monkeypatch):
+    monkeypatch.setenv("FAKE_RUNNING", f"{CORE},author.mod,{PROBE_ID}")
+    assert run(launcher, monkeypatch, "pass").outcome == PASS
+    monkeypatch.setenv("FAKE_RUNNING", PROBE_ID)
+    trial = run(launcher, monkeypatch, "error")
+    assert trial.outcome == UNRESOLVED and "did not load" in trial.excerpt
+
+
+def test_a_config_copy_that_cannot_be_refreshed_is_no_answer(launcher, monkeypatch):
+    def locked(*_):
+        raise PermissionError("Prefs.xml is in use")
+    monkeypatch.setattr("rimbisect.trial.prepare_savedata", locked)
+    trial = run(launcher, monkeypatch, "pass")
+    assert trial.outcome == UNRESOLVED and "Prefs.xml is in use" in trial.excerpt
+
+
+def test_the_game_does_not_outlive_rimbisect():
+    script = (f"import subprocess, sys, os; sys.path.insert(0, {str(SRC)!r}); from rimbisect.trial import Job; "
+              "p = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(60)']); "
+              "job = Job.holding(p.pid); print(p.pid if job else 'no job', flush=True); os._exit(0)")
+    pid = subprocess.run([sys.executable, "-c", script], capture_output=True, text=True, timeout=30).stdout.strip()
+    assert pid.isdigit(), pid
+    deadline = time.monotonic() + 5
+    while alive(pid) and time.monotonic() < deadline:
+        time.sleep(0.1)
+    assert not alive(pid)
 
 
 def test_trials_are_numbered_and_logs_kept(launcher, monkeypatch):

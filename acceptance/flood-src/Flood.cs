@@ -15,4 +15,19 @@ namespace RimbisectFlood
             }
         }
     }
+
+    // A second flood once the probe is running, then an error of its own. It is only seen if
+    // the game's message count is kept from reaching the limit while the flood happens.
+    [StaticConstructorOnStartup]
+    public static class LateFlood
+    {
+        static LateFlood()
+        {
+            for (int i = 0; i < 10001; i++)
+            {
+                Log.Warning("rimbisect acceptance late flood " + i);
+            }
+            Log.Error("rimbisectLateFloodError");
+        }
+    }
 }

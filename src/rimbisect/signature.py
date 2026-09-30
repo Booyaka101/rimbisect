@@ -7,9 +7,12 @@ from dataclasses import dataclass, field
 
 _GUID = re.compile(r"\b[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\b", re.I)
 _HEX = re.compile(r"\b0x[0-9a-f]+\b|\b(?=[0-9a-f]*[a-f])(?=[0-9a-f]*\d)[0-9a-f]{8,}\b", re.I)
-_QUOTED = re.compile(r"'[^'\n]*'|\"[^\"\n]*\"")
+_QUOTED = re.compile(r"(?<!\w)'[^'\n]*'(?!\w)|\"[^\"\n]*\"")
 _NUMBER = re.compile(r"\d+(?:\.\d+)?")
-_FRAME = re.compile(r"^\s*at\s")
+_FRAME = re.compile(r"^\s*at\s+(?:\(wrapper [^)]*\)\s*)?([^(\s]+)")
+_GENERIC = re.compile(r"\[[^\]]*\]")
+_DMD = re.compile(r"DMD<.*::([^>]+)>+")
+_HARMONY = re.compile(r"^MonoMod\.Utils\.DynamicMethodDefinition\.|_Patch\d+$")
 
 
 def normalize(line: str) -> str:
@@ -20,8 +23,19 @@ def normalize(line: str) -> str:
     return " ".join(line.split())
 
 
+def _method(frame: re.Match) -> str:
+    """Type and method name of a stack frame, the same whether Harmony patched it or not.
+
+    Harmony renames a patched method to `Verse.Pawn.Verse.Pawn.Tick_Patch1` or
+    `Verse.Pawn.DMD<DMD<Tick_Patch1>?123::Tick_Patch1>`, so whether some other mod in the
+    trial patches it would otherwise change the signature.
+    """
+    name = _HARMONY.sub("", _DMD.sub(r"\1", _GENERIC.sub("", frame.group(1))))
+    return normalize(".".join(name.split(".")[-2:]))
+
+
 def signature_of(text: str) -> str:
-    """First line of the error plus its first stack frame, normalized.
+    """First line of the error plus the method of its first stack frame, normalized.
 
     The frame keeps two NullReferenceExceptions from different methods apart; the rest of
     the trace varies with load order and is left out.
@@ -30,8 +44,8 @@ def signature_of(text: str) -> str:
     if not lines:
         return ""
     key = normalize(lines[0])
-    frame = next((line for line in lines[1:] if _FRAME.match(line)), None)
-    return f"{key} | {normalize(frame)}" if frame else key
+    frame = next((m for m in map(_FRAME.match, lines[1:]) if m), None)
+    return f"{key} | {_method(frame)}" if frame else key
 
 
 @dataclass

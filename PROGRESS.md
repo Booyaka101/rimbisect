@@ -14,83 +14,125 @@ All on the owner's PC: RimWorld 1.6.4871 (Steam, `D:\SteamLibrary`), i9-14900K, 
       PYTHONPATH=src python -m rimbisect bisect --config acceptance/work/ModsConfig-200.xml \
           --workdir acceptance/work/rb --match rimbisectNoSuchField
 
-  Exit 0, found the test mod unattended in 11 trials (baseline plus 10), 7m24s. Trial
-  times 98.7, 116.3, 8.3, 38.8, 61.8, 5.1, 35.2, 33.7, 4.8, 38.7, 2.8 seconds. The output
-  is in README.md.
+  Found the test mod unattended on the final code (run 2026-09-30_11-53-13), exit 0,
+  12 trials in 11m47s: the baseline, 10 bisect trials, and the confirm trial with the
+  full list minus the culprit (199 mods). That is 11 after the baseline, as the estimate
+  printed after the baseline said. Trial times 65.4, 96.3, 8.3, 42.3, 54.8, 4.8, 34.7,
+  34.5, 4.6, 38.5, 2.8, 319.6 seconds. Every passing trial ran 1200 game ticks (20 game
+  seconds). The output is in README.md.
+- **Paused maps.** The run before that one (2026-09-30_11-29-17, same result, 14m16s)
+  had 0 game ticks in trials 2 and 12: HugsLib's update news and Brrainz's feature
+  dialog (Achtung, Camera+) paused the new game, so those trials only "passed" by the
+  one-minute real-time cap. The probe now closes windows that force a pause and sets the
+  speed to normal. A check on the same 103 mod list then ran 1200 ticks and passed in
+  93.8s instead of 158s, and the report named both windows.
+- **Native crash.** The first attempt of that 103 mod check died in map generation with
+  an access violation in ntdll (0xC0000005, in the Windows event log), on a list that
+  passed before and after. So big real lists crash now and then for no repeatable reason.
+  Without `--crash-is-fail`, the search used to count that as a pass; it now runs a
+  crashed trial again once. The crash excerpt starts with the exit code.
 - **Crash path.** A test mod `rimbisect.acceptance.mapfail` whose scenario part throws
   after map generation, in a 16 mod list:
 
       PYTHONPATH=src python -m rimbisect bisect --config acceptance/work/ModsConfig-mapfail-16.xml \
-          --workdir acceptance/work/rb --crash-is-fail --settle 5 --timeout 6
+          --workdir acceptance/work/rb --crash-is-fail --settle 5 --ignore-last-good
 
-  Exit 0, found it in 4 trials, 1m26s. Every CRASH trial ended within seconds of the
-  game's "Error while generating a map" dialog, which the probe detects.
+  Exit 0, found it in 5 trials including the confirm trial, 1m53s. Every CRASH trial
+  ended within seconds of the game's "Error while generating a map" dialog.
 - **Log flood.** RimWorld stops logging after 10,000 messages. A test mod
-  `rimbisect.acceptance.flood` logs 10,001 warnings in its constructor, staged ahead of
-  brokendef in a 17 mod list (`ModsConfig-flood-17.xml`). With the first probe build,
-  `rimbisect check --match rimbisectNoSuchField` passed (exit 0, 268s): the broken def's
-  XML error was never logged. With the fixed probe the same check failed on it after 8.1s
-  (exit 1), and the report noted the reset.
-- **Without `--crash-is-fail`** the same list exits 1 with "did not reproduce any error",
-  and no traceback when stdin is closed.
-- **`rimbisect check`** from the wheel installed into a clean venv, on the owner's own
-  8 mod list: PASS in 20.7s, `last-good.json` saved, exit 0.
-- After every run the probe folder was gone from `<game>\Mods` and no RimWorld process
-  was left. The real `ModsConfig.xml` was never written.
-- `python -m pytest`: 127 passed.
-- `python -m build` makes the wheel and sdist. The wheel includes the probe's
-  `About.xml` and `RimbisectProbe.dll` (hash checked against `src/`), installs into a
-  fresh venv, and `rimbisect --version`, `mods` and `check` run from it.
+  `rimbisect.acceptance.flood` logs 10,001 warnings in its constructor and 10,001 more
+  from a static constructor later in loading, then logs `rimbisectLateFloodError`:
+
+      PYTHONPATH=src python -m rimbisect check --config acceptance/work/ModsConfig-flood-17.xml \
+          --workdir acceptance/work/rb-flood --match rimbisectLateFloodError --settle 5
+
+  FAIL in 26.3s, exit 1. All 10,001 late lines are in the log and the late error was
+  seen: the probe sets the game's counter back every 5,000 messages. The one reset in
+  the report is from the constructor flood, which runs before the probe is loaded.
+- **Game time.** A 12 mod `check --settle 5` passed in 34.1s with 300 ticks, and with no
+  "Resolution too small" error now that the UI scale is set to 1.
+- **Job object.** Twice the session running a bisect was killed mid-run; both times no
+  RimWorld process was left. The probe folder was left in `Mods`, as the README says.
+- After every finished run the probe folder was gone from `<game>\Mods` and no RimWorld
+  process was left. The real `ModsConfig.xml` and `Prefs.xml` were never written.
+- `python -m pytest`: 163 passed. `python -m pyflakes src tests acceptance/*.py` clean.
+- `python -m build` makes the wheel and sdist. The wheel's `RimbisectProbe.dll` matches
+  `src/` by hash, installs into a fresh venv, and `rimbisect --version` and `mods` run
+  from it.
 - Function-pair similarity check (difflib over every function of 6+ lines in src, tests
-  and acceptance): no pair above 0.40.
+  and acceptance): no pair above 0.45.
 
-## Review pass
+## Review passes
 
-An independent review of the code found six problems. All are fixed, with tests:
+Three rounds of independent review, each followed by fixes with tests.
 
-- High: the probe went blind after RimWorld's 10,000 message cap, so a trial could pass
-  with the error in it. The probe now turns logging back on (verified above).
-- Ctrl+C before the first trial, an empty `Prefs.xml` and a malformed `last-good.json`
-  gave tracebacks. `main` now returns 130 on Ctrl+C, an empty Prefs is replaced, a bad
-  last-good file is ignored with a warning. `--match` and `--since` are checked before
-  the run folder is made, so a typo no longer costs a baseline or leaves a Config copy.
-- `taskkill /T` could kill an unrelated process whose parent id was reused by the game.
-  rimbisect now kills the game and only the children created after it.
-- A log line written just before the probe's done event could be missed. The log is
-  now read up to the probe's done line before a trial passes.
-- The probe read the game's message queue without a lock at startup; now guarded.
-- Not changed: the reviewer flagged `Translate()` on the timer thread. It only runs when
-  an error dialog is already open, and that dialog's title was translated on the main
-  thread, so the language data is loaded by then.
+Probe and game side:
+
+- The probe went blind after RimWorld's 10,000 message cap. It now keeps the counter
+  from getting there, and switches logging back on if it was reached earlier.
+- Nothing checked that the game loaded the mods it was given (Steam closed mid-run makes
+  it skip Workshop mods silently). The probe reports the loaded list; a trial missing
+  mods the full list had is no answer, and so is a FAIL from such a list.
+- Settle was real time, so a slow PC tested less game. It is now game ticks with a
+  real-time cap, and passes with little game time are flagged in the report.
+- The events file was reopened for every line; it is one writer now.
+- Forcing 1280x720 made a "Resolution too small" error for players with a big UI scale.
+  The copied Prefs set the UI scale to 1.
+- Config and HugsLib settings are copied fresh for each trial, so a setting one trial
+  writes doesn't reach the next. A copy that fails is no answer instead of a traceback.
+- The game runs in a job object, so it can't outlive rimbisect.
+- Windows that pause a new game are closed (found live in this pass, see above).
+
+Search and matching:
+
+- `locate_all` looped forever when a culprit was also an alternative dependency of
+  another mod, and alternative dependencies could name an innocent mod. Mods taken out of
+  the search are never loaded as an alternative again.
+- Independent causes were reported as one. A confirm trial without the culprit now runs,
+  and the search goes on if the error is still there.
+- `--keep` mods' dependencies were still searched; they are loaded with the kept mods.
+- Error signatures depended on which other mods patched the method, and lost the method
+  name for generic types. Harmony's renamed frames are mapped back, and `[T]` is dropped.
+- A crash while hunting some other error counted as a pass; it is now run again once.
+
+CLI and docs: Ctrl+C, an empty `Prefs.xml` and a bad `last-good.json` gave tracebacks;
+`--match` and `--since` were checked after the run folder was made; a line continuation
+in `cli.py` was mangled. All fixed. README options split by command, exit codes include
+inconclusive, the limitations list mod settings kept outside `Config`.
+
+Not changed: `Translate()` on the probe's timer thread. It only runs when an error
+dialog is already open, and that dialog's title was translated on the main thread.
 
 ## Not verified
 
 - The "RecoveredFromErrors" dialog (the game falling back to Core alone after a load
   error) is detected by the same code as the map dialog, but was never triggered live.
-  Taken from the decompiled `PlayDataLoader`.
-- The 400 mod timing in the README is an estimate from the 200 mod run.
-- Non-Steam installs, other RimWorld versions than 1.6.4871, Windows 10.
 - Pairs of mods that only fail together were tested with the fake game and the simulator
   only, not with two real test mods.
-- The README progress block is from a run before the "expect about N more trials" line
-  was added, so that line is missing there. Rerun the acceptance to refresh it.
+- The 400 mod timing in the README is an estimate from the 200 mod run.
+- The crash retry was tested with the fake game; the native crash it is for was seen
+  live once but not during a bisect.
+- A baseline that gives no answer is not run again; the run stops and says why.
+- If the probe fails to write one event, it drops its writer and opens a new one on the
+  next event without disposing the old stream. Harmless for a process that exits soon.
+- Non-Steam installs, other RimWorld versions than 1.6.4871, Windows 10.
 
 ## Next steps for the owner
 
 1. Create the GitHub repo `Booyaka101/rimbisect` (the URLs in `pyproject.toml` point
    there), push `main`, and add a CI workflow for `python -m pytest` on `windows-latest`
    if you want one. The tests need Windows (`tasklist`, `.bat` fake game).
-2. `python -m build` and `twine upload dist/*` from the phone's build path. The dist in
-   `dist/` predates the last commit; rebuild it first.
+2. `python -m build` and `twine upload dist/*`. The dist in `dist/` was built from the
+   final commit; rebuild if anything changes.
 3. First distribution step, below.
 
 To run the acceptance again: `python acceptance/stage.py install --size 200 --position 150`
 (or `--mod mapfail`, `--mod flood`) installs the test mod and writes the list to
-`acceptance/work`, and `python acceptance/stage.py remove` removes the test mods.
-The test mod sources are in `acceptance/brokendef`, `acceptance/mapfail-src` and
-`acceptance/flood-src`, the probe's
-in `probe-src` (`dotnet build -c Release`, then copy the DLL to
-`src/rimbisect/probe/Assemblies`).
+`acceptance/work`, and `python acceptance/stage.py remove` removes the test mods. The
+test mod sources are in `acceptance/brokendef`, `acceptance/mapfail-src` and
+`acceptance/flood-src`, the probe's in `probe-src` (`dotnet build -c Release` writes the
+DLL straight to `src/rimbisect/probe/Assemblies`). `acceptance/simulate.py` measures
+trial counts against a simulated game.
 
 ## First distribution step
 
@@ -112,19 +154,19 @@ or on a fresh map, since that is all rimbisect can reproduce:
 > error you pick, closes the game and keeps halving until it's down to the mod, or the two
 > mods that only break together. Dependencies stay loaded so you don't get fake missing
 > dependency errors, and it runs on a copy of your config so your mod list and saves
-> aren't touched. 200 mods took about 7 minutes on my PC.
+> aren't touched. 200 mods took about 12 minutes on my PC.
 >
 > It only catches stuff that happens at startup or in the first bit of a new map though,
 > so if the error needs your save it won't help. Windows only for now.
 
 Least sure of: "I made" (it was built with Claude; say so if anyone asks), and whether
-the 7 minute figure oversells it for someone on a slower PC with 400 mods.
+the 12 minute figure oversells it for someone on a slower PC with 400 mods.
 
 ## Missing features
 
-Built in this pass: the copied Config folder (15 MB on this PC) is deleted when a run
-ends, so run folders keep only logs and reports. The report notes trials that hit the
-message limit.
+Built in the review passes: the copied Config folder is deleted when a run ends; the
+report notes message-limit hits, slow trials, closed windows and mods the game did not
+load; `--match-text`; crash exit codes in the report; `--version`.
 
 Not built:
 

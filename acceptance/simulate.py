@@ -2,7 +2,8 @@
 
     python acceptance/simulate.py 400
 
-Counts search trials only; a real run adds the baseline.
+Counts search trials only, including the one that checks nothing else fails; a real run
+adds the baseline.
 """
 
 from __future__ import annotations
@@ -26,8 +27,8 @@ def trials(n: int, culprits: set[str], deps: dict) -> int:
     search = Search(order, game, CRITERION, keep={CORE}, log=lambda _: None)
     candidates = order.order[1:]
     search.record(candidates, True)
-    found = search.locate(candidates)
-    assert found == culprits, (found, culprits)
+    causes = search.locate_all(candidates)
+    assert causes == [culprits], (causes, culprits)
     return len(game.runs)
 
 
