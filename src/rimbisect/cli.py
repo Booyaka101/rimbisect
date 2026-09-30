@@ -9,12 +9,13 @@ import os
 import re
 import shutil
 import sys
+import traceback
 from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 
-from . import __version__, report
+from . import __version__, report, resume
 from .errors import UserError
 from .install import EXE_NAME, Game, default_config_dir, find_game, process_running
 from .modlist import PROBE_FOLDER, LoadOrder, ModsConfig, folder_mtime, read_mods_config, scan_mods
@@ -46,9 +47,13 @@ def load(args) -> Setup:
     warnings: list[str] = []
     mods = scan_mods(game, warnings)
     order = LoadOrder.build(config, mods, warnings)
-    workdir = getattr(args, "workdir", None) or Path(os.environ.get("LOCALAPPDATA", Path.home())) / "rimbisect"
-    workdir = workdir.expanduser().resolve()
+    workdir = _workdir(args)
     return Setup(game, config_path, config, order, workdir, warnings)
+
+
+def _workdir(args) -> Path:
+    workdir = getattr(args, "workdir", None) or Path(os.environ.get("LOCALAPPDATA", Path.home())) / "rimbisect"
+    return workdir.expanduser().resolve()
 
 
 def _preflight(setup: Setup) -> None:
@@ -75,7 +80,7 @@ def _session(game: Game, launcher: GameLauncher):
             log(f"warning: could not delete {game.mods_dir / PROBE_FOLDER}; delete it before you play")
 
 
-def _new_run(setup: Setup, args) -> tuple[Path, GameLauncher]:
+def _new_run(setup: Setup) -> Path:
     stamp = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
     run_dir = setup.workdir / "runs" / stamp
     suffix = 1
@@ -90,9 +95,35 @@ def _new_run(setup: Setup, args) -> tuple[Path, GameLauncher]:
     except OSError as exc:
         raise UserError(f"could not create the run folder {run_dir}: {exc.strerror or exc}. "
                         "Pick another with --workdir.") from exc
-    launcher = GameLauncher(setup.game, setup.config, run_dir, default_config_dir(),
-                            settle=args.settle, timeout=args.timeout * 60, log=log)
-    return run_dir, launcher
+    return run_dir
+
+
+def _save_file(args) -> Path | None:
+    """The save --save names, a file or a name from the game's Saves folder. The resolved
+    path goes back into args, which a resumed run reads."""
+    if args.save is None:
+        return None
+    saves = default_config_dir().parent / "Saves"
+    for path in (Path(args.save).expanduser(), saves / args.save, saves / f"{args.save}.rws"):
+        if path.is_file():
+            args.save = str(path.resolve())
+            return path.resolve()
+    found = sorted(saves.glob("*.rws"), key=lambda p: -p.stat().st_mtime) if saves.is_dir() else []
+    names = ", ".join(p.stem for p in found[:10]) or "none"
+    raise UserError(f"--save {args.save}: no such save. The newest in {saves}: {names}")
+
+
+def _launcher(setup: Setup, args, run_dir: Path, save: Path | None = None) -> GameLauncher:
+    """save is copied into the run folder, where a resumed run finds it again."""
+    copy = run_dir / "save.rws"
+    if save is not None:
+        try:
+            shutil.copyfile(save, copy)
+        except OSError as exc:
+            raise UserError(f"could not copy {save} to the run folder: {exc}") from exc
+    return GameLauncher(setup.game, setup.config, run_dir, default_config_dir(),
+                        settle=args.settle, timeout=args.timeout * 60, log=log,
+                        save=copy if args.save else None)
 
 
 def _criterion(args) -> Criterion | None:
@@ -114,13 +145,17 @@ def _criterion(args) -> Criterion | None:
 NEED_PICK = "pick one of the errors above with --pick N, or pass --match-text with a piece of it"
 
 
+def _show(numbered: list[tuple[int, ErrorGroup]]) -> None:
+    for i, group in numbered[:30]:
+        log(f"  {i:>4}. {group.count:>5}x  {group.headline[:140]}")
+    if len(numbered) > 30:
+        log(f"        ... and {len(numbered) - 30} more; type a piece of an error's text to find it")
+
+
 def _pick(groups: list[ErrorGroup], args) -> ErrorGroup:
-    shown = groups[:30]
-    log("\nErrors logged by the full mod list, most frequent first:\n")
-    for i, group in enumerate(shown, 1):
-        log(f"  {i:>3}. {group.count:>5}x  {group.headline[:140]}")
-    if len(groups) > len(shown):
-        log(f"       ... and {len(groups) - len(shown)} rarer ones")
+    """groups in the order shown: exceptions first, the rest most frequent first."""
+    log("\nErrors logged by the full mod list, exceptions first:\n")
+    _show(list(enumerate(groups, 1)))
     if args.pick is not None:
         if not 1 <= args.pick <= len(groups):
             raise UserError(f"--pick {args.pick}: pick a number between 1 and {len(groups)}")
@@ -129,11 +164,20 @@ def _pick(groups: list[ErrorGroup], args) -> ErrorGroup:
         raise UserError(NEED_PICK)
     while True:
         try:
-            answer = input(f"\nWhich error should rimbisect hunt? [1-{len(shown)}] ").strip()
+            answer = input("\nWhich error should rimbisect hunt? A number, or a piece of its text: ").strip()
         except EOFError:
             raise UserError(NEED_PICK) from None
         if answer.isdigit() and 1 <= int(answer) <= len(groups):
             return groups[int(answer) - 1]
+        found = [(i, g) for i, g in enumerate(groups, 1) if answer and answer.lower() in g.example.lower()]
+        if len(found) == 1:
+            log(f"  {found[0][0]:>4}. {found[0][1].headline[:140]}")
+            return found[0][1]
+        if found:
+            log(f"\n{len(found)} errors contain that:\n")
+            _show(found)
+        elif answer:
+            log("no error contains that")
 
 
 def _keep(setup: Setup, extra: list[str]) -> set[str]:
@@ -230,10 +274,12 @@ def _hunted(baseline: Trial, criterion: Criterion | None, args) -> Criterion | N
         return criterion if _reproduced(baseline, args) else None
     if args.crash_is_fail and args.pick is None:
         return Criterion() if baseline.outcome == CRASH else None
-    groups = group_errors(baseline.errors)
+    # Exceptions are rare next to missing-def errors, which some mod lists log thousands of.
+    groups = sorted(group_errors(baseline.errors), key=lambda g: "Exception" not in g.example)
     if not groups:
         return None
     chosen = _pick(groups, args)
+    args.pick = groups.index(chosen) + 1
     baseline.outcome, baseline.excerpt = FAIL, chosen.example
     return Criterion(signature=chosen.signature, label=chosen.headline)
 
@@ -246,7 +292,7 @@ def _emit(data: dict, run_dir: Path, as_json: bool) -> None:
         print(text, end="")
 
 
-def cmd_bisect(args) -> int:
+def cmd_bisect(args, resumed: tuple[Path, dict] | None = None) -> int:
     setup = load(args)
     _preflight(setup)
     keep = _keep(setup, args.keep)
@@ -259,20 +305,31 @@ def cmd_bisect(args) -> int:
         raise UserError("--pick chooses from the errors of the full list; leave it out with --match, "
                         "--match-text or --slower-than")
     _since(args)
+    save = None if resumed else _save_file(args)
     log(f"rimbisect {__version__}: {len(setup.order.order)} active mods, {len(candidates)} to search")
-    changed, changed_since = _changed(setup, candidates, args)
-    run_dir, launcher = _new_run(setup, args)
+    if resumed is None:
+        changed, changed_since = _changed(setup, candidates, args)
+        run_dir = _new_run(setup)
+        resume.start(run_dir, args, setup, changed, changed_since)
+    else:
+        run_dir, state = resumed
+        resume.check_unchanged(state, setup, log)
+        changed, changed_since = state["changed"], state["changedSince"]
     log(f"run folder {run_dir}")
+    launcher = _launcher(setup, args, run_dir, save)
+    journal = resume.Journal(launcher, run_dir, log)
 
     fields = dict(run_dir=run_dir, game=setup.game, config_path=setup.config_path, order=setup.order,
                   searched=len(candidates), warnings=setup.warnings, trials=launcher.trials,
-                  crash_is_fail=args.crash_is_fail, settle=args.settle, changed_since=changed_since)
+                  crash_is_fail=args.crash_is_fail, settle=args.settle, changed_since=changed_since,
+                  save=args.save)
     search: Search | None = None
     with _session(setup.game, launcher):
         try:
-            baseline = _baseline(launcher, setup, criterion, args)
+            baseline = _baseline(journal, setup, criterion, args)
             _warn_not_loaded(baseline, setup)
             hunted = _hunted(baseline, criterion, args)
+            resume.update(run_dir, args=resume.saved_args(args, setup.workdir))
             if criterion is None:
                 # Only now is it known whether the picked error counts as a failure.
                 log(baseline.line())
@@ -280,18 +337,19 @@ def cmd_bisect(args) -> int:
                 what = "the error" if criterion else "a crash" if args.crash_is_fail and args.pick is None else "any error"
                 setup.warnings.append(f"the full mod list did not reproduce {what} (baseline outcome {baseline.outcome})")
                 _emit(report.build(status=report.NOT_REPRODUCED, criterion=criterion, **fields), run_dir, args.json)
+                resume.update(run_dir, finished=True)
                 return 1
             criterion = hunted
             steps = math.ceil(math.log2(len(candidates))) if len(candidates) > 1 else 0
             # Offsets measured with acceptance/simulate.py at 64, 200 and 400 mods.
             log(f"the full list took {baseline.duration:.0f}s; expect about {steps + 3} more trials "
                 f"for a single culprit, {2 * steps + 4} for two mods that only fail together")
-            search = Search(setup.order, launcher, criterion, keep, repeats=args.repeats,
+            search = Search(setup.order, journal, criterion, keep, repeats=args.repeats,
                             crash_is_fail=args.crash_is_fail, log=log)
             search.record(candidates, True)
             causes = search.locate_all(candidates, changed)
         except KeyboardInterrupt:
-            log("interrupted; the game has been closed")
+            log("interrupted; the game has been closed. `rimbisect resume` goes on from here.")
             _emit(report.build(status=report.INTERRUPTED, criterion=criterion, changed=changed,
                                causes=search.groups if search else None,
                                flaky=search.flaky if search else None, **fields), run_dir, args.json)
@@ -306,6 +364,7 @@ def cmd_bisect(args) -> int:
     status = report.FOUND if causes else report.BASE_GAME_FAILS
     _emit(report.build(status=status, criterion=criterion, causes=causes, base_fails=search.base_fails,
                        flaky=search.flaky, changed=changed, **fields), run_dir, args.json)
+    resume.update(run_dir, finished=True)
     return 0 if causes else 1
 
 
@@ -313,10 +372,13 @@ def cmd_check(args) -> int:
     setup = load(args)
     _preflight(setup)
     criterion = _criterion(args)
-    run_dir, launcher = _new_run(setup, args)
+    save = _save_file(args)
+    run_dir = _new_run(setup)
+    launcher = _launcher(setup, args, run_dir, save)
     log(f"rimbisect {__version__}: one trial with all {len(setup.order.order)} active mods")
     fields = dict(run_dir=run_dir, game=setup.game, config_path=setup.config_path, order=setup.order,
-                  criterion=criterion, trials=launcher.trials, settle=args.settle, warnings=setup.warnings)
+                  criterion=criterion, trials=launcher.trials, settle=args.settle, save=args.save,
+                  warnings=setup.warnings)
     with _session(setup.game, launcher):
         try:
             trial = launcher.run(setup.order.trial_list(setup.order.order), "check", criterion)
@@ -332,6 +394,20 @@ def cmd_check(args) -> int:
     status = report.CHECK_PASSED if passed else report.CHECK_FAILED
     _emit(report.build(status=status, errors=group_errors(trial.errors), **fields), run_dir, args.json)
     return 0 if passed else 1
+
+
+def cmd_resume(args) -> int:
+    runs = _workdir(args) / "runs"
+    run_dir = args.run.expanduser().resolve() if args.run else resume.latest_unfinished(runs)
+    if run_dir is None:
+        raise UserError(f"there is no unfinished run in {runs} to resume")
+    state = resume.load(run_dir)
+    if state.get("finished"):
+        raise UserError(f"the run in {run_dir} is finished; its report is in {run_dir / 'report.txt'}")
+    saved = _parser().parse_args(["bisect"])
+    resume.restored_args(state, saved)
+    log(f"resuming the run started {state.get('started', '?')}")
+    return cmd_bisect(saved, (run_dir, state))
 
 
 def cmd_mods(args) -> int:
@@ -393,6 +469,9 @@ def _parser() -> argparse.ArgumentParser:
                       help="a trial fails when an error or log line contains TEXT, taken literally")
     what.add_argument("--slower-than", type=_above_zero(float), metavar="SECONDS",
                       help="a trial fails when the map takes longer than SECONDS to be ready")
+    trial_opts.add_argument("--save", metavar="NAME",
+                            help="load this save instead of starting a new colony: a name from your Saves "
+                                 "folder or a .rws file. Only copied, never written.")
     trial_opts.add_argument("--settle", type=_above_zero(float), default=20, metavar="SECONDS",
                             help="game seconds to keep the map running before quitting (default 20)")
     trial_opts.add_argument("--timeout", type=_above_zero(float), default=20, metavar="MINUTES",
@@ -423,18 +502,57 @@ def _parser() -> argparse.ArgumentParser:
     check = sub.add_parser("check", parents=[common, trial_opts], help=what, description=what)
     check.set_defaults(func=cmd_check)
 
+    what = "go on with a bisect run that was stopped, without running its finished trials again"
+    resumed = sub.add_parser("resume", help=what, description=what)
+    resumed.add_argument("run", nargs="?", type=Path, metavar="RUN_FOLDER",
+                         help="the run's folder (default: the latest unfinished run)")
+    resumed.add_argument("--workdir", type=Path, metavar="PATH",
+                         help=r"where to look for runs (default: %%LOCALAPPDATA%%\rimbisect)")
+    resumed.set_defaults(func=cmd_resume)
+
     what = "show the active mod list as rimbisect reads it, with warnings"
     mods = sub.add_parser("mods", parents=[common], help=what, description=what)
     mods.set_defaults(func=cmd_mods)
     return parser
 
 
-def main(argv: list[str] | None = None) -> int:
-    # Redirected output would otherwise use the ANSI code page and choke on mod names.
-    for stream in (sys.stdout, sys.stderr):
-        if hasattr(stream, "reconfigure"):
-            stream.reconfigure(encoding="utf-8", errors="replace")
-    args = _parser().parse_args(argv)
+def _double_clicked() -> bool:
+    """The standalone exe started from Explorer: the only programs in its console window
+    are its own two processes (PyInstaller's launcher and the one it unpacks)."""
+    if not getattr(sys, "frozen", False) or os.name != "nt":
+        return False
+    import ctypes
+    return ctypes.windll.kernel32.GetConsoleProcessList((ctypes.c_uint32 * 4)(), 4) <= 2
+
+
+def _ask(prompt: str) -> str:
+    try:
+        return input(prompt).strip()
+    except EOFError:
+        return ""
+
+
+def cmd_guided(args) -> int:
+    """What a double-click runs: resume an unfinished run, or bisect with the defaults."""
+    log(f"rimbisect {__version__} finds the mod behind a RimWorld error. It starts the game on smaller\n"
+        "and smaller parts of your mod list, which takes from a few minutes to an hour. You can use\n"
+        "the computer meanwhile, but leave the game windows it opens alone. Ctrl+C stops it.\n")
+    parser = _parser()
+    unfinished = resume.latest_unfinished(_workdir(args) / "runs")
+    if unfinished and _ask(f"There is an unfinished run in {unfinished}. Go on with it? [Y/n] ").lower() != "n":
+        return cmd_resume(parser.parse_args(["resume", str(unfinished)]))
+    bisect = parser.parse_args(["bisect"])
+    while True:
+        bisect.save = _ask("Load a save instead of starting a new colony? Type its name, or press Enter: ") or None
+        try:
+            _save_file(bisect)
+            break
+        except UserError as exc:
+            log(str(exc))
+    return cmd_bisect(bisect)
+
+
+def _run(args) -> int:
     try:
         return args.func(args)
     except UserError as exc:
@@ -443,6 +561,23 @@ def main(argv: list[str] | None = None) -> int:
     except KeyboardInterrupt:
         print("rimbisect: interrupted", file=sys.stderr)
         return 130
+
+
+def main(argv: list[str] | None = None) -> int:
+    # Redirected output would otherwise use the ANSI code page and choke on mod names.
+    for stream in (sys.stdout, sys.stderr):
+        if hasattr(stream, "reconfigure"):
+            stream.reconfigure(encoding="utf-8", errors="replace")
+    if argv is None and len(sys.argv) == 1 and _double_clicked():
+        try:
+            code = _run(argparse.Namespace(func=cmd_guided))
+        except Exception:
+            # Otherwise the window closes before anyone can read the traceback.
+            traceback.print_exc()
+            code = 1
+        _ask("\nPress Enter to close this window.")
+        return code
+    return _run(_parser().parse_args(argv))
 
 
 if __name__ == "__main__":

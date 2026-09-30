@@ -42,3 +42,27 @@ jobs:
         with:
           name: dist
           path: dist/
+
+  exe:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Build rimbisect.exe from a clean venv
+        shell: bash
+        run: |
+          python -m venv exe-venv
+          exe-venv/Scripts/python -m pip install . "pyinstaller>=6.10,<7"
+          exe-venv/Scripts/python -m PyInstaller --onefile --name rimbisect --collect-data rimbisect \
+            --workpath build/pyi --specpath build --distpath dist/exe src/rimbisect/__main__.py
+      - name: Run it and check the probe is inside
+        shell: bash
+        run: |
+          dist/exe/rimbisect.exe --version
+          exe-venv/Scripts/pyi-archive_viewer -l dist/exe/rimbisect.exe | grep -F RimbisectProbe.dll
+      - uses: actions/upload-artifact@v4
+        with:
+          name: exe
+          path: dist/exe/rimbisect.exe

@@ -35,6 +35,19 @@ if scenario == "settings":
     savedata = next(a for a in args if a.startswith("-savedatafolder=")).split("=", 1)[1]
     with open(os.path.join(savedata, "Config", "Mod_Example_Settings.xml"), "w") as fh:
         fh.write("changed by a mod")
+if scenario == "save":
+    savedata = next(a for a in args if a.startswith("-savedatafolder=")).split("=", 1)[1]
+    with open(os.path.join(savedata, "Config", "Prefs.xml"), encoding="utf-8") as fh:
+        prefs = fh.read()
+    with open(os.path.join(savedata, "Saves", "autostart.rws"), encoding="utf-8") as fh:
+        save = fh.read()
+    # The real game only loads autostart in dev mode, and -quicktest would start a new colony.
+    if "<devMode>True</devMode>" in prefs and "-quicktest" not in args:
+        emit("error", f"loaded {save}, pauseOnLoad {'<pauseOnLoad>False' in prefs}")
+    emit("map_ready")
+    emit("done", "1200")
+    say("RIMBISECT_DONE")
+    sys.exit(0)
 if scenario == "late_line":
     emit("map_ready")
     emit("done")
@@ -61,6 +74,8 @@ elif scenario == "logline":
     say("XML error: <rimbisectNoSuchField>1</rimbisectNoSuchField> doesn't correspond to any field")
 elif scenario == "exit":
     say("Crash!!!")
+    for line in ("", "=" * 65, "	Managed Stacktrace:", "=" * 65, "=" * 65):
+        say(line)
     sys.exit(1)
 elif scenario == "exit_unterminated":
     log.write("XML error: rimbisectNoSuchField, and no newline before the crash")

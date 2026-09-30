@@ -54,6 +54,8 @@ class FakeGame:
         self.rule = rule
         self.runs: list[list[str]] = []
         self.trials: list[Trial] = []
+        self.numbered = 0
+        self.not_loaded_at_first: set[str] | None = None
 
     def run(self, mods, label, criterion) -> Trial:
         assert mods[-1] == PROBE_ID, "the probe must load last"
@@ -69,6 +71,7 @@ class FakeGame:
         errors = [(ERROR, 1)] if hit and hit != UNRESOLVED else []
         failed = criterion is not None and any(criterion.error_matches(text) for text, _ in errors)
         outcome = hit if hit in (CRASH, UNRESOLVED) else FAIL if failed else PASS
-        trial = Trial(len(self.runs), label, list(mods), outcome, 1.0, errors=errors)
+        self.numbered += 1
+        trial = Trial(self.numbered, label, list(mods), outcome, 1.0, errors=errors)
         self.trials.append(trial)
         return trial

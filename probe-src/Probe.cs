@@ -317,25 +317,25 @@ namespace RimbisectProbe
 
         // Some mods open a window that pauses the game on a new colony, or start it paused,
         // and nobody is there to close it. Settle would then pass with no game time at all.
+        // Superfast only gets the settle ticks done sooner; a slow list runs as fast as it can.
         private void KeepPlaying()
         {
             TickManager time = Find.TickManager;
-            if (!time.Paused)
+            if (time.Paused)
             {
-                return;
-            }
-            foreach (Window window in Find.WindowStack.Windows.Where(w => w.forcePause).ToList())
-            {
-                string name = window.GetType().FullName;
-                if (Find.WindowStack.TryRemove(window, false) && closed.Add(name))
+                foreach (Window window in Find.WindowStack.Windows.Where(w => w.forcePause).ToList())
                 {
-                    Log.Message("RIMBISECT_CLOSED " + name);
-                    Probe.Emit("closed", name, 1);
+                    string name = window.GetType().FullName;
+                    if (Find.WindowStack.TryRemove(window, false) && closed.Add(name))
+                    {
+                        Log.Message("RIMBISECT_CLOSED " + name);
+                        Probe.Emit("closed", name, 1);
+                    }
                 }
             }
-            if (time.CurTimeSpeed == TimeSpeed.Paused)
+            if (time.CurTimeSpeed != TimeSpeed.Superfast)
             {
-                time.CurTimeSpeed = TimeSpeed.Normal;
+                time.CurTimeSpeed = TimeSpeed.Superfast;
             }
         }
     }

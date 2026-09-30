@@ -15,3 +15,5 @@ acceptance/mapfail-src/bin/
 acceptance/mapfail-src/obj/
 acceptance/flood-src/bin/
 acceptance/flood-src/obj/
+acceptance/savefail-src/bin/
+acceptance/savefail-src/obj/

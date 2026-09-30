@@ -15,9 +15,17 @@ which it deletes when the run ends.
 
 ## Install
 
-You need Windows, RimWorld 1.6 from Steam, and Python 3.11 or newer. If you don't have
-Python, get it from [python.org](https://www.python.org/downloads/) and tick "Add
-python.exe to PATH" in the installer. Then, in PowerShell:
+You need Windows and RimWorld 1.6 from Steam.
+
+The easy way is `rimbisect.exe` from the
+[latest release](https://github.com/Booyaka101/rimbisect/releases/latest). It needs
+nothing else installed. Double-click it and it asks the two things it needs to know, or
+run it from a terminal with the commands below. The exe isn't signed, so Windows
+SmartScreen may warn about it the first time ("More info", then "Run anyway").
+
+With Python 3.11 or newer, install it from PyPI instead. If you don't have Python, get it
+from [python.org](https://www.python.org/downloads/) and tick "Add python.exe to PATH" in
+the installer. Then, in PowerShell:
 
 ```
 py -m pip install rimbisect
@@ -38,12 +46,15 @@ rimbisect bisect
 
 rimbisect finds your install through Steam and takes the mod list you have active in the
 game. It first runs your full list once and shows the errors it logged, grouped and
-numbered. Type the number of the one you want gone, then leave it. (`--pick N` answers
-ahead of time, but the numbers can shift between runs when errors come and go.) The game
+numbered, exceptions first. Type the number of the one you want gone, or a piece of its
+text, then leave it. (`--pick N` answers ahead of time, but the numbers can shift between
+runs when errors come and go.) The game
 opens and closes on its own for every trial; don't click in it, and don't use the PC for
 games meanwhile. Expect 10 to 20 trials, each one a game start. A 200 mod list took 12
 minutes on a fast PC; count on two to three times as long as your full list takes to load
-into a map. Ctrl+C stops the run at any point and closes the game.
+into a map. Ctrl+C stops the run at any point and closes the game, and
+`rimbisect resume` goes on from there later without running the finished trials again.
+It also picks up a run that died with the PC.
 
 If you already know what the error says, skip the question. `--match-text` takes a piece
 of the error as you see it in the log (`Player.log`, next to the `Config` folder
@@ -52,6 +63,17 @@ mentioned below); `--match` takes a regular expression:
 ```
 rimbisect bisect --match-text "doesn't correspond to any field"
 ```
+
+If the error only happens in your colony, give it a save. Every trial then loads a copy
+of that save instead of starting a new colony:
+
+```
+rimbisect bisect --save "My colony"
+```
+
+The name is the one in the game's load menu, or a path to a `.rws` file. A save made with
+mods that a trial leaves out still loads, with the usual errors about the missing things.
+They don't confuse the search, which only looks for the error you picked.
 
 This is a real run on a 200 mod list with a test mod that has a broken def at position
 150. It was made for testing with `--config`, which is why the paths are in a repo; yours
@@ -186,7 +208,10 @@ copy of your `Config` folder (mod settings included), HugsLib's settings and the
 mod list. The copy is made again before every trial, so a setting one trial changes
 doesn't leak into the next, and it is deleted when the run ends. The copied `Prefs.xml`
 runs the game in a 1280x720 window with the sound off and the UI scale at 1. Your own
-`ModsConfig.xml` and `Prefs.xml` are only read, and your saves are never opened.
+`ModsConfig.xml` and `Prefs.xml` are only read. With `--save`, the save is copied into
+the run folder and each trial loads a fresh copy of it; the game only loads a save at
+startup in dev mode, so the trial's `Prefs.xml` turns that on. The original is never
+opened for writing.
 
 For the run, rimbisect copies a small mod, `rimbisect-probe`, into the game's `Mods`
 folder and deletes it afterwards, also on Ctrl+C. It loads last, writes errors and
@@ -194,6 +219,9 @@ progress to a file rimbisect watches, and closes the game once the map has settl
 has no Harmony patches and does nothing when rimbisect did not start the game. If
 rimbisect is killed hard, delete `Mods\rimbisect-probe` yourself or let the next run
 replace it.
+
+The probe runs the map at the fastest speed while it settles, so `--settle` is game
+time and a passing trial on a quick PC only needs a few seconds of it.
 
 RimWorld stops logging for good after 10,000 messages, which a big list can reach while
 loading. The probe keeps the game's count from getting there, and switches logging back
@@ -232,6 +260,7 @@ Windows job object, so it also closes if rimbisect is killed or its window is cl
 | | |
 | --- | --- |
 | `rimbisect bisect` | Find the mods behind an error |
+| `rimbisect resume [RUN_FOLDER]` | Go on with the newest unfinished run, or the one given |
 | `rimbisect check` | Run the full list once; if it gets through, save it as the last good state |
 | `rimbisect mods` | Show the mod list the way rimbisect reads it, with warnings |
 
@@ -251,6 +280,7 @@ Every command takes these:
 | `--match REGEX` | Fail when an error or log line matches |
 | `--match-text TEXT` | Fail when an error or log line contains TEXT, taken literally |
 | `--slower-than SECONDS` | Fail when the map is not ready after this long |
+| `--save NAME` | Load this save in every trial instead of starting a new colony. Only copied |
 | `--settle SECONDS` | Game seconds a map has to run without the error to pass. Default 20 |
 | `--timeout MINUTES` | Give up on a single trial after this long. Default 20 |
 
@@ -276,8 +306,11 @@ when interrupted.
 
 - Windows only, and only the Steam version has been tried. The probe is built for 1.6.
 - It finds errors that happen while the game starts and during the first `--settle`
-  seconds on a fresh map. Problems that need your save, a raid or a year of play are out
-  of reach.
+  seconds on a fresh map, or on your save with `--save`. Problems that need a raid or a
+  year of play are out of reach.
+- `resume` refuses a run whose game version or mod list changed since it started. It
+  only warns when mod files are newer, since some mods write logs into their own folder
+  every time the game starts.
 - Settings of mods that keep them outside `Config` (other than HugsLib) are not copied,
   so those mods run with their defaults.
 - A problem that depends on load order, rather than on which mods are present, is only

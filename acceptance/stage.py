@@ -27,7 +27,7 @@ from rimbisect.install import default_config_dir, find_game  # noqa: E402
 from rimbisect.modlist import CORE, LoadOrder, read_mods_config, scan_mods  # noqa: E402
 
 HERE = Path(__file__).resolve().parent
-TEST_MODS = ("brokendef", "mapfail", "flood")
+TEST_MODS = ("brokendef", "mapfail", "flood", "savefail")
 
 
 def install(args) -> None:
