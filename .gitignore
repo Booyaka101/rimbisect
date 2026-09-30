@@ -17,3 +17,5 @@ acceptance/flood-src/bin/
 acceptance/flood-src/obj/
 acceptance/savefail-src/bin/
 acceptance/savefail-src/obj/
+acceptance/framefail-src/bin/
+acceptance/framefail-src/obj/
