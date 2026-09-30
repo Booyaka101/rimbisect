@@ -24,8 +24,8 @@ _SUMMARY = {
     BASE_GAME_FAILS: ("the error happens with only the kept mods loaded (Core, DLCs, --keep and what they "
                       "need); no removable mod causes it"),
     NOT_REPRODUCED: "the full mod list did not reproduce the error, so there is nothing to narrow down",
-    INTERRUPTED: "stopped before the search finished; the trials so far are below",
-    INCONCLUSIVE: "a trial gave no answer twice on the same mods, so the search could not go on",
+    INTERRUPTED: "stopped before it finished; the trials so far are below",
+    INCONCLUSIVE: "the search could not go on; the warning below says why",
     CHECK_PASSED: "the full mod list reached the map and quit cleanly",
     CHECK_FAILED: "the full mod list did not reach the map and quit cleanly",
 }
@@ -75,8 +75,9 @@ def trial_record(trial: Trial) -> dict:
 def build(*, status: str, run_dir: Path, game, config_path: Path, order: LoadOrder,
           criterion: Criterion | None, trials: list[Trial], searched: int = 0,
           causes: list[set[str]] | None = None, base_fails: bool = False, flaky: list[dict] | None = None,
-          changed: list[str] | None = None, errors: list[ErrorGroup] | None = None,
-          crash_is_fail: bool = False, settle: float | None = None, warnings: list[str]) -> dict:
+          changed: list[str] | None = None, changed_since: str | None = None,
+          errors: list[ErrorGroup] | None = None, crash_is_fail: bool = False, settle: float | None = None,
+          warnings: list[str]) -> dict:
     causes = [[pid for pid in order.order if pid in group] for group in causes or []]
     ordered = [pid for group in causes for pid in group]
     removed = [pid for pid in order.order if pid in ordered] + order.dependents(ordered)
@@ -135,6 +136,7 @@ def build(*, status: str, run_dir: Path, game, config_path: Path, order: LoadOrd
         "searchedMods": searched,
         "criterion": criterion.describe() if criterion else None,
         "changedMods": [order.spelling.get(p, p) for p in changed] if changed else None,
+        "changedSince": changed_since if changed else None,
         "culprits": [dict(describe_mod(order, pid, game.short_version), cause=number)
                      for number, group in enumerate(causes, 1) for pid in group],
         "fixedModsConfig": str(fixed_path) if fixed_path else None,
@@ -164,11 +166,12 @@ def render_text(report: dict) -> str:
     if criterion:
         what = {"signature": criterion.get("example") or criterion["value"],
                 "regex": f"log matches /{criterion['value']}/",
+                "text": f'log contains "{criterion["value"]}"',
                 "slower_than": f"map not ready within {criterion['value']}s",
                 "crash": "the game crashes"}[criterion["kind"]]
         out.append(f"error       {what.splitlines()[0] if what else ''}")
     if report["changedMods"]:
-        out.append(f"changed     {len(report['changedMods'])} mods since the last good run")
+        out.append(f"changed     {_count(len(report['changedMods']), 'mod')} {report['changedSince']}")
     out.append(f"run folder  {report['run']}")
 
     several = len({c["cause"] for c in report["culprits"]}) > 1

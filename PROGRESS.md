@@ -14,12 +14,15 @@ All on the owner's PC: RimWorld 1.6.4871 (Steam, `D:\SteamLibrary`), i9-14900K, 
       PYTHONPATH=src python -m rimbisect bisect --config acceptance/work/ModsConfig-200.xml \
           --workdir acceptance/work/rb --match rimbisectNoSuchField
 
-  Found the test mod unattended on the final code (run 2026-09-30_11-53-13), exit 0,
-  12 trials in 11m47s: the baseline, 10 bisect trials, and the confirm trial with the
+  Found the test mod unattended on the final code (run 2026-09-30_12-34-49), exit 0,
+  12 trials in 12m20s: the baseline, 10 bisect trials, and the confirm trial with the
   full list minus the culprit (199 mods). That is 11 after the baseline, as the estimate
-  printed after the baseline said. Trial times 65.4, 96.3, 8.3, 42.3, 54.8, 4.8, 34.7,
-  34.5, 4.6, 38.5, 2.8, 319.6 seconds. Every passing trial ran 1200 game ticks (20 game
-  seconds). The output is in README.md.
+  printed after the baseline said. Trial times 78.0, 114.4, 8.3, 41.5, 54.8, 5.1, 34.7,
+  35.7, 4.6, 39.5, 2.8, 320.1 seconds. The new "culprits alone" check reused trial 11,
+  which was that exact list, so it cost nothing here. The probe still closed and reported
+  both pausing windows after the change to count only windows it actually removed. The
+  output is in README.md. The run before the last review round (2026-09-30_11-53-13)
+  took the same 12 trials in 11m47s.
 - **Paused maps.** The run before that one (2026-09-30_11-29-17, same result, 14m16s)
   had 0 game ticks in trials 2 and 12: HugsLib's update news and Brrainz's feature
   dialog (Achtung, Camera+) paused the new game, so those trials only "passed" by the
@@ -55,16 +58,19 @@ All on the owner's PC: RimWorld 1.6.4871 (Steam, `D:\SteamLibrary`), i9-14900K, 
   RimWorld process was left. The probe folder was left in `Mods`, as the README says.
 - After every finished run the probe folder was gone from `<game>\Mods` and no RimWorld
   process was left. The real `ModsConfig.xml` and `Prefs.xml` were never written.
-- `python -m pytest`: 163 passed. `python -m pyflakes src tests acceptance/*.py` clean.
+- `python -m pytest`: 183 passed. `python -m pyflakes src tests acceptance/*.py` clean.
 - `python -m build` makes the wheel and sdist. The wheel's `RimbisectProbe.dll` matches
   `src/` by hash, installs into a fresh venv, and `rimbisect --version` and `mods` run
   from it.
 - Function-pair similarity check (difflib over every function of 6+ lines in src, tests
-  and acceptance): no pair above 0.45.
+  and acceptance): the only pairs above 0.45 are a nested helper against the function
+  around it (`cli._above_zero`'s checker, a test's `rule`), which is the same lines
+  counted twice.
 
 ## Review passes
 
-Three rounds of independent review, each followed by fixes with tests.
+Four rounds of independent review, each followed by fixes with tests. Every test added
+in the last round was checked to fail on the code before its fix.
 
 Probe and game side:
 
@@ -100,19 +106,42 @@ CLI and docs: Ctrl+C, an empty `Prefs.xml` and a bad `last-good.json` gave trace
 in `cli.py` was mangled. All fixed. README options split by command, exit codes include
 inconclusive, the limitations list mod settings kept outside `Config`.
 
+Last round (search, trial loop and CLI, three reviewers):
+
+- The search could blame mods that don't fail alone: an error that shows up only some of
+  the time narrows to whatever was left. The narrowed set is now run on its own (reusing
+  a matching trial unless it is the baseline), and the run stops as inconclusive with
+  advice to use `--repeats` if it passes.
+- With `--since`, a second cause among the changed mods was missed, and a changed mod
+  pulled in as an alternative dependency could frame an unchanged one. Mods that need
+  each other (a dependency cycle) sent the search into infinite recursion.
+- The baseline gave up on the first trial without an answer; it now retries like the
+  search does, through one shared function.
+- An error logged before the probe reported the loaded mods could end a trial as FAIL on
+  a list the game had not fully loaded. The game falling back to Core alone after a load
+  error was not seen at all; it is a crash now. The last log line was lost when the game
+  exited without a newline. The probe's own log lines could match `--match`.
+- Signatures included the pawn's name for "Exception ticking Kaylee" errors; with a stack
+  frame it is now the exception type and the method.
+- CLI: an interrupted or inconclusive run dropped the causes found so far; `check` had no
+  report on Ctrl+C; zero, negative or NaN numbers, an empty `--match-text`, a `--pick`
+  with a match, an unknown `--keep` id, a missing `--config` and a workdir that is a file
+  gave tracebacks or odd runs. `--workdir` was accepted by `mods`, which ignores it.
+  The report shows the `--since` date.
+
 Not changed: `Translate()` on the probe's timer thread. It only runs when an error
 dialog is already open, and that dialog's title was translated on the main thread.
 
 ## Not verified
 
-- The "RecoveredFromErrors" dialog (the game falling back to Core alone after a load
-  error) is detected by the same code as the map dialog, but was never triggered live.
+- The game falling back to Core alone after a load error (its log lines and the
+  "RecoveredFromErrors" dialog) was tested with the fake game only.
+- The pawn-name signature change was tested with made-up log lines, not a live error.
 - Pairs of mods that only fail together were tested with the fake game and the simulator
   only, not with two real test mods.
 - The 400 mod timing in the README is an estimate from the 200 mod run.
 - The crash retry was tested with the fake game; the native crash it is for was seen
   live once but not during a bisect.
-- A baseline that gives no answer is not run again; the run stops and says why.
 - If the probe fails to write one event, it drops its writer and opens a new one on the
   next event without disposing the old stream. Harmless for a process that exits soon.
 - Non-Steam installs, other RimWorld versions than 1.6.4871, Windows 10.
@@ -129,6 +158,8 @@ dialog is already open, and that dialog's title was translated on the main threa
 To run the acceptance again: `python acceptance/stage.py install --size 200 --position 150`
 (or `--mod mapfail`, `--mod flood`) installs the test mod and writes the list to
 `acceptance/work`, and `python acceptance/stage.py remove` removes the test mods. The
+game's own mod list has only 8 mods now, so add `--source acceptance/work/ModsConfig-200.xml`
+to reuse the saved 200 mod list. The
 test mod sources are in `acceptance/brokendef`, `acceptance/mapfail-src` and
 `acceptance/flood-src`, the probe's in `probe-src` (`dotnet build -c Release` writes the
 DLL straight to `src/rimbisect/probe/Assemblies`). `acceptance/simulate.py` measures
@@ -166,7 +197,9 @@ the 12 minute figure oversells it for someone on a slower PC with 400 mods.
 
 Built in the review passes: the copied Config folder is deleted when a run ends; the
 report notes message-limit hits, slow trials, closed windows and mods the game did not
-load; `--match-text`; crash exit codes in the report; `--version`.
+load; `--match-text`; crash exit codes in the report; `--version`; the causes found so far
+in an interrupted or inconclusive report; a header row in `mods`; the `--since` date in
+the report.
 
 Not built:
 

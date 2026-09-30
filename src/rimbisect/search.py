@@ -12,8 +12,9 @@ the failure needs mods from both: it finds the needed part of the second half wi
 of the first loaded, then the needed part of the first with only that loaded. The same
 recursion handles three or more mods.
 
-Once a cause is found, the list without it is run once more. If that still fails, there
-is a second, independent cause, and the search goes on in what is left.
+Once a cause is found, it is run alone to confirm it, and the list without it is run
+once more. If that still fails, there is a second, independent cause, and the search goes
+on in what is left.
 """
 
 from __future__ import annotations
@@ -30,12 +31,38 @@ class _Unconfirmed(Exception):
 
 
 class Inconclusive(Exception):
-    """The same mod list gave no answer twice (a timeout, or mods the game did not load)."""
+    """The search cannot go on: a mod list gave no answer twice (a timeout, or mods the game
+    did not load), or the mods it narrowed down to do not show the error on their own."""
 
-    def __init__(self, trial: Trial):
-        reason = trial.excerpt.splitlines()[0] if trial.excerpt else "no result"
-        super().__init__(f"trial {trial.number} gave no answer twice on the same {trial.mod_count} mods ({reason})")
+    def __init__(self, message: str, advice: str, trial: Trial | None = None):
+        super().__init__(message)
+        self.advice = advice
         self.trial = trial
+
+
+def run_answered(launcher: Launcher, mods: list[str], label: str, criterion: Criterion | None,
+                 crash_is_fail: bool, log: Callable[[str], None]) -> Trial:
+    """One trial, run again if it gave no answer, or crashed before the error could show.
+
+    Big mod lists crash now and then for no reason that repeats; a crash that does repeat
+    counts as not showing the error. Logs every trial but the one it returns.
+    """
+    outcomes: list[str] = []
+    while True:
+        trial = launcher.run(mods, label, criterion)
+        outcomes.append(trial.outcome)
+        if trial.outcome == UNRESOLVED:
+            label = "no answer, again"
+        elif trial.outcome == CRASH and not crash_is_fail and outcomes.count(CRASH) == 1:
+            label = "crashed, again"
+        else:
+            return trial
+        log(trial.line())
+        if outcomes.count(UNRESOLVED) == 2:
+            reason = trial.excerpt.splitlines()[0] if trial.excerpt else "no result"
+            raise Inconclusive(f"trial {trial.number} gave no answer twice on the same {trial.mod_count} mods "
+                               f"({reason})", f"Its mod list is in report.json and the game's log in {trial.log}; "
+                               "if it timed out, a longer --timeout may get through", trial)
 
 
 class Search:
@@ -49,9 +76,11 @@ class Search:
         self.crash_is_fail = crash_is_fail
         self.log = log
         self.cache: dict[frozenset[str], bool] = {}
+        self.seeded: set[frozenset[str]] = set()
         self.flaky: list[dict] = []
         self.saw_pass = False
         self.base_fails = False
+        self.groups: list[set[str]] = []
         # Mods taken out of the search, which no trial may load as an alternative dependency.
         self.excluded: set[str] = set()
 
@@ -64,6 +93,7 @@ class Search:
     def record(self, ids: Iterable[str], failed: bool) -> None:
         """Seed the cache with a result obtained elsewhere (the baseline)."""
         self.cache[self._key(ids)] = failed
+        self.seeded.add(self._key(ids))
         self.saw_pass |= not failed
 
     def known(self, ids: Iterable[str]) -> bool | None:
@@ -92,21 +122,9 @@ class Search:
         return failed
 
     def _run(self, mods: list[str], label: str) -> Trial:
-        """One trial, run again once if it gave no answer, or crashed before the error could show.
-
-        Big mod lists crash now and then for no reason that repeats; a crash that does repeat
-        counts as not showing the error.
-        """
-        for attempt in range(2):
-            trial = self.launcher.run(mods, label, self.criterion)
-            self.log(trial.line())
-            if trial.outcome == UNRESOLVED:
-                label = "no answer, again"
-            elif trial.outcome == CRASH and not self.crash_is_fail and attempt == 0:
-                label = "crashed, again"
-            else:
-                return trial
-        raise Inconclusive(trial)
+        trial = run_answered(self.launcher, mods, label, self.criterion, self.crash_is_fail, self.log)
+        self.log(trial.line())
+        return trial
 
     def find(self, candidates: list[str], fixed: set[str] | None = None, verified: bool = True) -> set[str]:
         """A small subset M of candidates with fails(fixed | M).
@@ -143,7 +161,9 @@ class Search:
         innocent: check whether those dependencies fail without it."""
         already = self.order.closure(fixed | self.keep, self.excluded)
         pulled = [d for d in self.order.order if d in self.order.closure({pid}, self.excluded) - already - {pid}]
-        if pulled and self.fails(fixed | set(pulled), "dependency check"):
+        # Dependencies that need pid back (a cycle) cannot be tried without it.
+        if pulled and pid not in self.order.closure(pulled, self.excluded) \
+                and self.fails(fixed | set(pulled), "dependency check"):
             return self.find(pulled, fixed)
         return {pid}
 
@@ -156,27 +176,38 @@ class Search:
             unchanged = [c for c in candidates if c not in removed]
             recent = [c for c in candidates if c in removed]
             self.excluded |= removed
-            if self.fails(unchanged, "without changed mods"):
+            without = self.fails(unchanged, "without changed mods")
+            if without:
                 self.log(f"the error reproduces without the {len(recent)} changed mods; searching the rest")
-                candidates = unchanged
-            else:
-                self.excluded -= removed
+                found = self.find(unchanged) if unchanged else set()
+            self.excluded -= removed
+            # With the changed mods allowed again, one of them can come back in as an
+            # alternative dependency of an unchanged mod; then the split does not hold.
+            if not without and not self.fails(unchanged, "without changed mods"):
                 self.log(f"the error needs at least one of the {len(recent)} changed mods")
                 found = self.find(recent, set(unchanged))
-                if not self.fails(found, "changed mods alone"):
+                if unchanged and not self.fails(found, "changed mods alone"):
                     found |= self.find(unchanged, found)
         if found is None:
-            if not candidates:
-                return set()
-            found = self.find(candidates)
+            found = self.find(candidates) if candidates else set()
         if not self.saw_pass and self.fails(set(), "base game only"):
             return set()
+        if found and self._key(found) in self.seeded:
+            # Every mod is needed, which rests on the baseline alone; see that it fails again.
+            del self.cache[self._key(found)]
+            self.seeded.discard(self._key(found))
+        if found and not self.fails(found, "culprits alone"):
+            names = self.order.written([pid for pid in self.order.order if pid in found])
+            raise Inconclusive(f"the mods the search narrowed down to ({', '.join(names[:5])}"
+                               f"{', ...' if len(names) > 5 else ''}) do not show the error on their own",
+                               "The error may not show up every time; --repeats 3 runs each passing list "
+                               "up to three times")
         return found
 
     def locate_all(self, candidates: list[str], changed: list[str] | None = None) -> list[set[str]]:
         """Every independent cause among candidates, as one set of culprits each. When the
         kept mods alone fail, base_fails is set and the causes found before that are returned."""
-        groups: list[set[str]] = []
+        groups = self.groups
         while True:
             found = self.locate(candidates, changed)
             if not found:

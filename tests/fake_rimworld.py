@@ -27,6 +27,9 @@ def emit(kind, text=None):
 scenario = os.environ["FAKE_SCENARIO"]
 say("Mono path[0] = 'fake'")
 running = os.environ.get("FAKE_RUNNING")
+if scenario == "late_start":
+    say("Patching exception in a mod constructor: rimbisectNoSuchField")
+    time.sleep(1)
 emit("started", "\n".join(running.split(",")) if running else None)
 if scenario == "settings":
     savedata = next(a for a in args if a.startswith("-savedatafolder=")).split("=", 1)[1]
@@ -47,6 +50,7 @@ if scenario in ("pass", "log_reset", "settings", "paused"):
     emit("map_ready")
     say("RIMBISECT_MAP_READY")
     if scenario == "paused":
+        say("RIMBISECT_CLOSED HugsLib.News.Dialog_UpdateFeatures")
         emit("closed", "HugsLib.News.Dialog_UpdateFeatures")
     emit("done", "1200")
     say("RIMBISECT_DONE")
@@ -58,6 +62,14 @@ elif scenario == "logline":
 elif scenario == "exit":
     say("Crash!!!")
     sys.exit(1)
+elif scenario == "exit_unterminated":
+    log.write("XML error: rimbisectNoSuchField, and no newline before the crash")
+    log.flush()
+    sys.exit(1)
+elif scenario == "fallback":
+    say("Caught exception while loading play data but there are active mods other than Core. "
+        "Resetting mods config and trying again.")
+    say("The exception was: System.InvalidOperationException: boom")
 elif scenario == "gave_up":
     emit("error", "Exception from asynchronous event: System.InvalidOperationException: boom\n  at Some.Frame ()")
     emit("gave_up", "Error generating map: An error occurred while generating the map.")

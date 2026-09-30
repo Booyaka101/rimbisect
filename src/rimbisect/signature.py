@@ -10,6 +10,7 @@ _HEX = re.compile(r"\b0x[0-9a-f]+\b|\b(?=[0-9a-f]*[a-f])(?=[0-9a-f]*\d)[0-9a-f]{
 _QUOTED = re.compile(r"(?<!\w)'[^'\n]*'(?!\w)|\"[^\"\n]*\"")
 _NUMBER = re.compile(r"\d+(?:\.\d+)?")
 _FRAME = re.compile(r"^\s*at\s+(?:\(wrapper [^)]*\)\s*)?([^(\s]+)")
+_EXCEPTION = re.compile(r"\b(?:[A-Za-z_]\w*\.)+\w*Exception\b")
 _GENERIC = re.compile(r"\[[^\]]*\]")
 _DMD = re.compile(r"DMD<.*::([^>]+)>+")
 _HARMONY = re.compile(r"^MonoMod\.Utils\.DynamicMethodDefinition\.|_Patch\d+$")
@@ -38,14 +39,18 @@ def signature_of(text: str) -> str:
     """First line of the error plus the method of its first stack frame, normalized.
 
     The frame keeps two NullReferenceExceptions from different methods apart; the rest of
-    the trace varies with load order and is left out.
+    the trace varies with load order and is left out. With a stack trace, an exception type
+    in the first line stands for the whole line: the text around it often names a pawn, and
+    -quicktest makes new colonists every launch.
     """
     lines = [line for line in text.splitlines() if line.strip()]
     if not lines:
         return ""
-    key = normalize(lines[0])
     frame = next((m for m in map(_FRAME.match, lines[1:]) if m), None)
-    return f"{key} | {_method(frame)}" if frame else key
+    if not frame:
+        return normalize(lines[0])
+    exception = _EXCEPTION.search(lines[0])
+    return f"{exception.group(0) if exception else normalize(lines[0])} | {_method(frame)}"
 
 
 @dataclass
@@ -94,6 +99,8 @@ class Criterion:
     def describe(self) -> dict:
         if self.signature is not None:
             return {"kind": "signature", "value": self.signature, "example": self.label}
+        if self.pattern is not None and self.label:
+            return {"kind": "text", "value": self.label}
         if self.pattern is not None:
             return {"kind": "regex", "value": self.pattern.pattern}
         if self.slower_than is not None:

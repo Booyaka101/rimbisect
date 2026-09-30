@@ -28,6 +28,14 @@ def test_a_harmony_patch_does_not_change_the_signature():
     assert signature_of(plain).endswith("| Pawn.Tick")
 
 
+def test_a_pawn_named_in_the_error_does_not_change_the_signature():
+    trace = "\n  at RimWorld.JobDriver_Haul.Tick () [0x0001c] in <c5b2f7a8>:0"
+    kaylee = signature_of("Exception ticking Kaylee: System.NullReferenceException: Object reference not set" + trace)
+    harry = signature_of("Exception ticking Harry: System.NullReferenceException: Object reference not set" + trace)
+    cast = signature_of("Exception ticking Harry: System.InvalidCastException: Specified cast is not valid" + trace)
+    assert kaylee == harry != cast
+
+
 def test_methods_of_generic_types_stay_apart():
     head = "System.NullReferenceException: Object reference not set\n"
     add = signature_of(head + "  at Verse.ThingOwner`1[T].TryAdd (T item) [0x00012] in <abc>:0")

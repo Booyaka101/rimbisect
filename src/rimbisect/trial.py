@@ -21,6 +21,9 @@ from .signature import Criterion
 
 PASS, FAIL, CRASH, UNRESOLVED = "PASS", "FAIL", "CRASH", "UNRESOLVED"
 DONE_LINE = "RIMBISECT_DONE"
+PROBE_LINE = "RIMBISECT_"
+# When loading throws, the game drops every mod but Core and loads again, without the probe.
+FALLBACK_LINES = ("Caught exception while loading play data", "Could not recover from errors loading play data")
 
 # Unattended trials must keep running without focus; the rest just keeps them out of the way.
 PREF_OVERRIDES = {
@@ -201,10 +204,14 @@ def kill_tree(proc: subprocess.Popen, job: Job | None = None) -> None:
     if job is not None:
         job.close()
     elif proc.poll() is None:
-        listed = subprocess.run(["powershell", "-NoProfile", "-NonInteractive", "-Command",
-                                 _DESCENDANTS.format(pid=proc.pid)], capture_output=True, text=True)
+        try:
+            listed = subprocess.run(["powershell", "-NoProfile", "-NonInteractive", "-Command",
+                                     _DESCENDANTS.format(pid=proc.pid)], capture_output=True, text=True,
+                                    timeout=60).stdout
+        except (OSError, subprocess.TimeoutExpired):
+            listed = ""
         proc.kill()
-        for pid in listed.stdout.split():
+        for pid in listed.split():
             try:
                 os.kill(int(pid), signal.SIGTERM)
             except (OSError, ValueError):
@@ -223,16 +230,20 @@ class _Tail:
         self.offset = 0
         self.partial = b""
 
-    def lines(self) -> list[str]:
+    def lines(self, final: bool = False) -> list[str]:
+        """With final, the file is complete and an unterminated last line counts too."""
         try:
             with open(self.path, "rb") as fh:
                 fh.seek(self.offset)
                 data = fh.read()
         except OSError:
-            return []
+            data = b""
         self.offset += len(data)
         data = self.partial + data
         *complete, self.partial = data.split(b"\n")
+        if final and self.partial:
+            complete.append(self.partial)
+            self.partial = b""
         return [line.decode("utf-8", errors="replace").rstrip("\r") for line in complete]
 
 
@@ -241,9 +252,6 @@ class GameLauncher:
 
     def __init__(self, game: Game, config: ModsConfig, run_dir: Path, real_config_dir: Path,
                  settle: float = 20.0, timeout: float = 1200.0, poll: float = 0.25, log=print):
-        if "=" in str(run_dir.resolve()):
-            raise UserError(f"the run folder {run_dir} contains '=', which RimWorld's -savedatafolder= "
-                            "cannot take. Pick another with --workdir.")
         self.game = game
         self.config = replace(config, version=game.version)
         self.run_dir = run_dir
@@ -280,17 +288,21 @@ class GameLauncher:
         job = Job.holding(proc.pid)
         log_tail, events_tail = _Tail(log_path), _Tail(events_path)
         recent: list[str] = []
-        done = log_done = False
+        done = log_done = loaded = False
         unloaded: str | None = None
         gave_up: str | None = None
 
-        def read_log() -> None:
-            nonlocal recent, log_done
-            for line in log_tail.lines():
+        def read_log(final: bool) -> None:
+            nonlocal recent, log_done, gave_up
+            for line in log_tail.lines(final):
                 if log_done or line == DONE_LINE:
                     log_done = True
                     return
                 recent = (recent + [line])[-40:]
+                if line.startswith(PROBE_LINE):
+                    continue
+                if line.startswith(FALLBACK_LINES) and gave_up is None:
+                    gave_up = "the game could not load this mod list and fell back to Core alone"
                 if criterion is not None and trial.outcome != FAIL and criterion.line_matches(line):
                     trial.outcome, trial.excerpt = FAIL, line[:300]
 
@@ -299,7 +311,7 @@ class GameLauncher:
                 elapsed = time.monotonic() - started
                 # Checked before reading, so a process that has exited has also finished writing.
                 exited = proc.poll() is not None
-                read_log()
+                read_log(exited)
                 for raw in events_tail.lines():
                     event = _parse_event(raw)
                     if event is None:
@@ -310,8 +322,10 @@ class GameLauncher:
                         trial.errors.append((text, int(event.get("repeats", 1))))
                         if criterion is not None and trial.outcome != FAIL and criterion.error_matches(text):
                             trial.outcome, trial.excerpt = FAIL, _clip(text)
-                    elif kind == "started" and "text" in event:
-                        unloaded = self._check_loaded(trial, str(event["text"]).split("\n"))
+                    elif kind == "started":
+                        loaded = True
+                        if "text" in event:
+                            unloaded = self._check_loaded(trial, str(event["text"]).split("\n"))
                     elif kind == "map_ready" and trial.map_ready is None:
                         trial.map_ready = round(elapsed, 1)
                     elif kind == "done":
@@ -327,7 +341,9 @@ class GameLauncher:
                     # A FAIL from a list the game only partly loaded says nothing about the list.
                     trial.outcome, trial.excerpt = UNRESOLVED, unloaded
                     break
-                if trial.outcome == FAIL:
+                # Mod constructors and assembly loading log before the probe reports what
+                # the game loaded, and a FAIL only counts from a list it loaded in full.
+                if trial.outcome == FAIL and (loaded or exited):
                     break
                 if criterion is not None and criterion.slower_than is not None:
                     if trial.map_ready is None and elapsed > criterion.slower_than:
@@ -343,7 +359,7 @@ class GameLauncher:
                     deadline = time.monotonic() + 30
                     while not log_done and time.monotonic() < deadline:
                         exited = proc.poll() is not None
-                        read_log()
+                        read_log(exited)
                         if exited:
                             break
                         time.sleep(self.poll)

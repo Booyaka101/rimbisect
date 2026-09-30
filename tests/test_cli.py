@@ -1,6 +1,7 @@
 import json
 import os
 import time
+from datetime import datetime
 
 import pytest
 
@@ -45,7 +46,8 @@ def env(tmp_path, monkeypatch):
     monkeypatch.setattr(cli, "GameLauncher", launcher)
     monkeypatch.setattr(cli, "default_config_dir", lambda: config_dir)
     monkeypatch.setattr(cli, "process_running", lambda image: image in state["running"] or image == "steam.exe")
-    state["args"] = ["--game", str(root), "--workdir", str(tmp_path / "work")]
+    state["game"] = ["--game", str(root)]
+    state["args"] = [*state["game"], "--workdir", str(tmp_path / "work")]
     state["root"] = root
     state["work"] = tmp_path / "work"
     return state
@@ -116,6 +118,17 @@ def test_a_list_that_times_out_twice_ends_the_search(env, capsys):
     assert any("gave no answer twice" in w for w in data["warnings"])
 
 
+@pytest.mark.parametrize("outcome, label", [(UNRESOLVED, "no answer, again"), (CRASH, "crashed, again")])
+def test_a_baseline_without_an_answer_is_run_again(env, capsys, outcome, label):
+    first = [outcome]
+    env["rule"] = lambda mods: first.pop() if first else "m11" in mods
+    assert cli.main(["bisect", *env["args"], "--match", "cross-reference"]) == 0
+    data, _ = reports(env)
+    assert [t["label"] for t in data["trials"][:3]] == ["baseline", label, "without changed mods"] or \
+        [t["label"] for t in data["trials"][:2]] == ["baseline", label]
+    assert [c["packageId"] for c in data["culprits"]] == ["m11"]
+
+
 def test_a_baseline_crash_counts_at_once_under_crash_is_fail(env, capsys):
     env["rule"] = lambda mods: CRASH if "m11" in mods else False
     args = ["bisect", *env["args"], "--match", "nothing like this", "--crash-is-fail", "--repeats", "3"]
@@ -155,8 +168,10 @@ def test_pick_out_of_range(env, capsys):
 
 def test_match_text_is_taken_literally(env, capsys):
     assert cli.main(["bisect", *env["args"], "--match-text", "Widget_12 (wanter=thingDef)"]) == 0
-    data, _ = reports(env)
+    data, run = reports(env)
     assert [c["packageId"] for c in data["culprits"]] == ["m11"]
+    assert data["criterion"] == {"kind": "text", "value": "Widget_12 (wanter=thingDef)"}
+    assert 'error       log contains "Widget_12 (wanter=thingDef)"' in (run / "report.txt").read_text(encoding="utf-8")
 
 
 def test_workshop_mods_need_steam(env, capsys, monkeypatch):
@@ -219,8 +234,16 @@ def test_check_fails_on_match(env, capsys):
 
 def test_since_date(env, capsys):
     assert cli.main(["bisect", *env["args"], "--match", "cross-reference", "--since", "31/12/2025"]) == 2
-    assert "--since takes a date" in capsys.readouterr().err
+    err = capsys.readouterr().err
+    assert "--since takes a date" in err and "rimbisect 0" not in err
     assert not (env["work"] / "runs").exists()
+    later = time.time() + 60
+    os.utime(env["root"] / "Mods" / "m11" / "About" / "About.xml", (later, later))
+    since = datetime.fromtimestamp(later - 30).isoformat(timespec="seconds")
+    assert cli.main(["bisect", *env["args"], "--match", "cross-reference", "--since", since]) == 0
+    data, run = reports(env)
+    assert data["changedMods"] == ["m11"]
+    assert f"changed     1 mod since {since}" in (run / "report.txt").read_text(encoding="utf-8")
 
 
 def test_broken_last_good_is_ignored_with_a_warning(env, capsys):
@@ -255,6 +278,10 @@ def test_interrupt_writes_a_partial_report(env, capsys, monkeypatch):
     data, _ = reports(env)
     assert data["status"] == "interrupted"
     assert len(data["trials"]) == 2
+    env["rule"] = lambda mods: (_ for _ in ()).throw(KeyboardInterrupt)
+    assert cli.main(["check", *env["args"]]) == 130
+    data, _ = reports(env)
+    assert data["status"] == "interrupted" and not data["trials"]
     assert not (env["root"] / "Mods" / PROBE_FOLDER).exists()
 
 
@@ -268,17 +295,38 @@ def test_user_errors(env, tmp_path, capsys):
     assert not (env["work"] / "runs").exists()
     assert cli.main(["mods", "--game", str(tmp_path)]) == 2
     assert "does not contain RimWorldWin64.exe" in capsys.readouterr().err
-    assert cli.main(["mods", *env["args"], "--config", str(tmp_path / "nope.xml")]) == 2
-    assert "no ModsConfig.xml" in capsys.readouterr().err
+    assert cli.main(["mods", *env["game"], "--config", str(tmp_path / "nope.xml")]) == 2
+    assert "nope.xml: no such file" in capsys.readouterr().err
     with pytest.raises(SystemExit):
         cli.main(["bisect", *env["args"], "--match", "x", "--slower-than", "30"])
+    for extra, message in [(["--match", "x", "--pick", "1"], "leave it out with --match"),
+                           (["--match-text", ""], "need some text"),
+                           (["--keep", "m03,nosuchmod"], "--keep nosuchmod: not in the active mod list")]:
+        assert cli.main(["bisect", *env["args"], *extra]) == 2
+        assert message in capsys.readouterr().err
+    assert not (env["work"] / "runs").exists()
+    (tmp_path / "a file").write_text("")
+    for workdir, message in [(tmp_path / "a file", "could not create the run folder"), (tmp_path / "a=b", "'='")]:
+        assert cli.main(["check", *env["game"], "--workdir", str(workdir)]) == 2
+        assert message in capsys.readouterr().err
+    assert not (tmp_path / "a=b" / "runs").exists()
+
+
+@pytest.mark.parametrize("option, value", [("--settle", "-1"), ("--settle", "nan"), ("--timeout", "0"),
+                                           ("--timeout", "inf"), ("--slower-than", "-5"), ("--repeats", "0"),
+                                           ("--repeats", "1.5"), ("--pick", "-3")])
+def test_numbers_have_to_make_sense(env, capsys, option, value):
+    with pytest.raises(SystemExit):
+        cli.main(["bisect", *env["args"], option, value])
+    assert option in capsys.readouterr().err
 
 
 def test_mods_command(env, capsys):
-    assert cli.main(["mods", *env["args"]]) == 0
+    assert cli.main(["mods", *env["game"]]) == 0
     out = capsys.readouterr().out
     assert "17 active mods" in out
-    assert cli.main(["mods", *env["args"], "--json"]) == 0
+    assert out.splitlines()[3].split() == ["#", "packageId", "source", "workshop", "name"]
+    assert cli.main(["mods", *env["game"], "--json"]) == 0
     data = json.loads(capsys.readouterr().out)
     assert data["mods"][10]["dependencies"] == ["m02"]
 

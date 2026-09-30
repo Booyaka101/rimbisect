@@ -18,9 +18,9 @@ from . import __version__, report
 from .errors import UserError
 from .install import EXE_NAME, Game, default_config_dir, find_game, process_running
 from .modlist import PROBE_FOLDER, LoadOrder, ModsConfig, folder_mtime, read_mods_config, scan_mods
-from .search import Inconclusive, Search
+from .search import Inconclusive, Search, run_answered
 from .signature import Criterion, ErrorGroup, group_errors
-from .trial import CRASH, FAIL, PASS, UNRESOLVED, GameLauncher, Trial, install_probe, remove_probe
+from .trial import CRASH, FAIL, PASS, GameLauncher, Trial, install_probe, remove_probe
 
 
 def log(message: str) -> None:
@@ -40,11 +40,14 @@ class Setup:
 def load(args) -> Setup:
     game = find_game(args.game)
     config_path = (args.config or default_config_dir() / "ModsConfig.xml").expanduser().resolve()
+    if args.config and not config_path.is_file():
+        raise UserError(f"--config {args.config}: no such file")
     config = read_mods_config(config_path)
     warnings: list[str] = []
     mods = scan_mods(game, warnings)
     order = LoadOrder.build(config, mods, warnings)
-    workdir = (args.workdir or Path(os.environ.get("LOCALAPPDATA", Path.home())) / "rimbisect").resolve()
+    workdir = getattr(args, "workdir", None) or Path(os.environ.get("LOCALAPPDATA", Path.home())) / "rimbisect"
+    workdir = workdir.expanduser().resolve()
     return Setup(game, config_path, config, order, workdir, warnings)
 
 
@@ -79,16 +82,25 @@ def _new_run(setup: Setup, args) -> tuple[Path, GameLauncher]:
     while run_dir.exists():
         suffix += 1
         run_dir = setup.workdir / "runs" / f"{stamp}-{suffix}"
-    run_dir.mkdir(parents=True)
+    if "=" in str(run_dir):
+        raise UserError(f"the run folder {run_dir} contains '=', which RimWorld's -savedatafolder= "
+                        "cannot take. Pick another with --workdir.")
+    try:
+        run_dir.mkdir(parents=True)
+    except OSError as exc:
+        raise UserError(f"could not create the run folder {run_dir}: {exc.strerror or exc}. "
+                        "Pick another with --workdir.") from exc
     launcher = GameLauncher(setup.game, setup.config, run_dir, default_config_dir(),
                             settle=args.settle, timeout=args.timeout * 60, log=log)
     return run_dir, launcher
 
 
 def _criterion(args) -> Criterion | None:
-    if args.match_text:
-        return Criterion(pattern=re.compile(re.escape(args.match_text)))
-    if args.match:
+    if args.match_text == "" or args.match == "":
+        raise UserError("--match and --match-text need some text; an empty one matches every line")
+    if args.match_text is not None:
+        return Criterion(pattern=re.compile(re.escape(args.match_text)), label=args.match_text)
+    if args.match is not None:
         try:
             return Criterion(pattern=re.compile(args.match))
         except re.error as exc:
@@ -99,7 +111,7 @@ def _criterion(args) -> Criterion | None:
     return None
 
 
-NEED_PICK = "pick one of the errors above with --pick N, or pass --match REGEX"
+NEED_PICK = "pick one of the errors above with --pick N, or pass --match-text with a piece of it"
 
 
 def _pick(groups: list[ErrorGroup], args) -> ErrorGroup:
@@ -128,10 +140,9 @@ def _keep(setup: Setup, extra: list[str]) -> set[str]:
     keep = set(setup.order.official())
     for entry in extra:
         for pid in filter(None, (p.strip().lower() for p in entry.split(","))):
-            if pid in setup.order.spelling:
-                keep.add(pid)
-            else:
-                setup.warnings.append(f"--keep {pid}: not in the active mod list, ignored")
+            if pid not in setup.order.spelling:
+                raise UserError(f"--keep {pid}: not in the active mod list. `rimbisect mods` lists the packageIds.")
+            keep.add(pid)
     return keep
 
 
@@ -139,34 +150,40 @@ def _last_good_path(setup: Setup) -> Path:
     return setup.workdir / "last-good.json"
 
 
-def _changed(setup: Setup, candidates: list[str], args) -> list[str] | None:
-    """Mods modified since --since or since the last passing `rimbisect check`."""
+def _since(args) -> float | None:
+    if args.since is None:
+        return None
+    try:
+        return datetime.fromisoformat(args.since).timestamp()
+    except ValueError as exc:
+        raise UserError(f"--since takes a date like 2026-09-01 or 2026-09-01T18:30, not {args.since!r}") from exc
+
+
+def _changed(setup: Setup, candidates: list[str], args) -> tuple[list[str] | None, str | None]:
+    """Mods modified since --since or since the last passing `rimbisect check`, and which of the two."""
     mods = setup.order.mods
-    if args.since:
-        try:
-            since = datetime.fromisoformat(args.since).timestamp()
-        except ValueError as exc:
-            raise UserError(f"--since takes a date like 2026-09-01 or 2026-09-01T18:30, not {args.since!r}") from exc
+    since = _since(args)
+    if since is not None:
         changed = [p for p in candidates if folder_mtime(mods[p].folder) > since]
         source = f"since {args.since}"
     else:
         path = _last_good_path(setup)
         if args.ignore_last_good or not path.is_file():
-            return None
+            return None, None
         try:
             saved = json.loads(path.read_text(encoding="utf-8"))["mods"]
             if not all(isinstance(t, (int, float)) for t in saved.values()):
                 raise ValueError("folder times are not numbers")
         except (OSError, ValueError, KeyError, TypeError, AttributeError) as exc:
             setup.warnings.append(f"ignored {path}: {exc}")
-            return None
+            return None, None
         # Folder times from a copy or restore can shift by a second or two.
         changed = [p for p in candidates if p not in saved or folder_mtime(mods[p].folder) > saved[p] + 2]
         source = "since the last good run"
     log(f"{len(changed)} of {len(candidates)} mods changed {source}")
     if not changed or len(changed) == len(candidates):
-        return None
-    return changed
+        return None, None
+    return changed, source
 
 
 def _save_last_good(setup: Setup) -> Path:
@@ -182,14 +199,17 @@ def _save_last_good(setup: Setup) -> Path:
 
 
 def _baseline(launcher: GameLauncher, setup: Setup, criterion: Criterion | None, args) -> Trial:
+    """The full list; with --repeats, up to that many times until it shows the error."""
     mods = setup.order.trial_list(setup.order.order)
-    for attempt in range(max(1, args.repeats)):
-        trial = launcher.run(mods, "baseline" if attempt == 0 else "baseline again", criterion)
-        if criterion is None:
-            break
-        log(trial.line())
+    trial = run_answered(launcher, mods, "baseline", criterion, args.crash_is_fail, log)
+    if criterion is None:
+        return trial
+    log(trial.line())
+    for _ in range(args.repeats - 1):
         if _reproduced(trial, args):
             break
+        trial = run_answered(launcher, mods, "baseline again", criterion, args.crash_is_fail, log)
+        log(trial.line())
     return trial
 
 
@@ -235,14 +255,18 @@ def cmd_bisect(args) -> int:
     if not candidates:
         raise UserError("every active mod is kept (Core, DLCs, --keep and what they need); there is nothing to search")
     criterion = _criterion(args)
+    if args.pick is not None and criterion is not None:
+        raise UserError("--pick chooses from the errors of the full list; leave it out with --match, "
+                        "--match-text or --slower-than")
+    _since(args)
     log(f"rimbisect {__version__}: {len(setup.order.order)} active mods, {len(candidates)} to search")
-    changed = _changed(setup, candidates, args)
+    changed, changed_since = _changed(setup, candidates, args)
     run_dir, launcher = _new_run(setup, args)
     log(f"run folder {run_dir}")
 
     fields = dict(run_dir=run_dir, game=setup.game, config_path=setup.config_path, order=setup.order,
                   searched=len(candidates), warnings=setup.warnings, trials=launcher.trials,
-                  crash_is_fail=args.crash_is_fail, settle=args.settle)
+                  crash_is_fail=args.crash_is_fail, settle=args.settle, changed_since=changed_since)
     search: Search | None = None
     with _session(setup.game, launcher):
         try:
@@ -254,9 +278,7 @@ def cmd_bisect(args) -> int:
                 log(baseline.line())
             if hunted is None:
                 what = "the error" if criterion else "a crash" if args.crash_is_fail and args.pick is None else "any error"
-                why = (baseline.excerpt.splitlines()[0] if baseline.outcome == UNRESOLVED and baseline.excerpt
-                       else f"baseline outcome {baseline.outcome}")
-                setup.warnings.append(f"the full mod list did not reproduce {what} ({why})")
+                setup.warnings.append(f"the full mod list did not reproduce {what} (baseline outcome {baseline.outcome})")
                 _emit(report.build(status=report.NOT_REPRODUCED, criterion=criterion, **fields), run_dir, args.json)
                 return 1
             criterion = hunted
@@ -271,14 +293,15 @@ def cmd_bisect(args) -> int:
         except KeyboardInterrupt:
             log("interrupted; the game has been closed")
             _emit(report.build(status=report.INTERRUPTED, criterion=criterion, changed=changed,
+                               causes=search.groups if search else None,
                                flaky=search.flaky if search else None, **fields), run_dir, args.json)
             return 130
         except Inconclusive as exc:
             log(f"stopping: {exc}")
-            setup.warnings.append(f"{exc}. Its mod list is in report.json and the game's log in {exc.trial.log}; "
-                                  "if it timed out, a longer --timeout may get through")
+            setup.warnings.append(f"{exc}. {exc.advice}")
             _emit(report.build(status=report.INCONCLUSIVE, criterion=criterion, changed=changed,
-                               flaky=search.flaky, **fields), run_dir, args.json)
+                               causes=search.groups if search else None,
+                               flaky=search.flaky if search else None, **fields), run_dir, args.json)
             return 1
     status = report.FOUND if causes else report.BASE_GAME_FAILS
     _emit(report.build(status=status, criterion=criterion, causes=causes, base_fails=search.base_fails,
@@ -292,11 +315,14 @@ def cmd_check(args) -> int:
     criterion = _criterion(args)
     run_dir, launcher = _new_run(setup, args)
     log(f"rimbisect {__version__}: one trial with all {len(setup.order.order)} active mods")
+    fields = dict(run_dir=run_dir, game=setup.game, config_path=setup.config_path, order=setup.order,
+                  criterion=criterion, trials=launcher.trials, settle=args.settle, warnings=setup.warnings)
     with _session(setup.game, launcher):
         try:
             trial = launcher.run(setup.order.trial_list(setup.order.order), "check", criterion)
         except KeyboardInterrupt:
             log("interrupted; the game has been closed")
+            _emit(report.build(status=report.INTERRUPTED, **fields), run_dir, args.json)
             return 130
     log(trial.line())
     _warn_not_loaded(trial, setup)
@@ -304,10 +330,7 @@ def cmd_check(args) -> int:
     if passed:
         log(f"saved this mod list as the last good one: {_save_last_good(setup)}")
     status = report.CHECK_PASSED if passed else report.CHECK_FAILED
-    _emit(report.build(status=status, run_dir=run_dir, game=setup.game, config_path=setup.config_path,
-                       order=setup.order, criterion=criterion, trials=launcher.trials,
-                       errors=group_errors(trial.errors), settle=args.settle, warnings=setup.warnings),
-          run_dir, args.json)
+    _emit(report.build(status=status, errors=group_errors(trial.errors), **fields), run_dir, args.json)
     return 0 if passed else 1
 
 
@@ -331,6 +354,7 @@ def cmd_mods(args) -> int:
         return 0
     print(f"{setup.game.root} ({setup.game.version})")
     print(f"{setup.config_path}: {len(rows)} active mods\n")
+    print(f"{'#':>4}  {'packageId':<45} {'source':<9} {'workshop':<11} name")
     for i, row in enumerate(rows, 1):
         print(f"{i:>4}  {row['packageId']:<45} {row['source']:<9} {row['workshopId'] or '-':<11} {row['name']}")
     if setup.warnings:
@@ -340,51 +364,67 @@ def cmd_mods(args) -> int:
     return 0
 
 
+def _above_zero(kind):
+    def parse(text: str):
+        try:
+            value = kind(text)
+        except ValueError:
+            raise argparse.ArgumentTypeError(f"not a {'whole ' if kind is int else ''}number: {text!r}") from None
+        if not (math.isfinite(value) and value > 0):
+            raise argparse.ArgumentTypeError(f"has to be more than 0, not {text}")
+        return value
+    return parse
+
+
 def _parser() -> argparse.ArgumentParser:
     common = argparse.ArgumentParser(add_help=False)
-    common.add_argument("--game", type=Path, help="RimWorld install folder (default: found through Steam)")
-    common.add_argument("--config", type=Path,
+    common.add_argument("--game", type=Path, metavar="PATH",
+                        help="RimWorld install folder (default: found through Steam)")
+    common.add_argument("--config", type=Path, metavar="FILE",
                         help="ModsConfig.xml to test (default: the game's own). Only read, never written.")
-    common.add_argument("--workdir", type=Path,
-                        help=r"where runs and last-good.json go (default: %%LOCALAPPDATA%%\rimbisect)")
-    common.add_argument("--json", action="store_true", help="print the report as JSON")
+    common.add_argument("--json", action="store_true", help="print JSON instead of text")
 
     trial_opts = argparse.ArgumentParser(add_help=False)
+    trial_opts.add_argument("--workdir", type=Path, metavar="PATH",
+                            help=r"where runs and last-good.json go (default: %%LOCALAPPDATA%%\rimbisect)")
     what = trial_opts.add_mutually_exclusive_group()
     what.add_argument("--match", metavar="REGEX", help="a trial fails when an error or log line matches REGEX")
     what.add_argument("--match-text", metavar="TEXT",
                       help="a trial fails when an error or log line contains TEXT, taken literally")
-    what.add_argument("--slower-than", type=float, metavar="SECONDS",
+    what.add_argument("--slower-than", type=_above_zero(float), metavar="SECONDS",
                       help="a trial fails when the map takes longer than SECONDS to be ready")
-    trial_opts.add_argument("--settle", type=float, default=20, metavar="SECONDS",
+    trial_opts.add_argument("--settle", type=_above_zero(float), default=20, metavar="SECONDS",
                             help="game seconds to keep the map running before quitting (default 20)")
-    trial_opts.add_argument("--timeout", type=float, default=20, metavar="MINUTES",
-                            help="give up on a trial after this long (default 20)")
+    trial_opts.add_argument("--timeout", type=_above_zero(float), default=20, metavar="MINUTES",
+                            help="give up on a trial after this many minutes (default 20)")
 
     parser = argparse.ArgumentParser(
         prog="rimbisect", description="Find the RimWorld mod, or combination of mods, behind an error.")
     parser.add_argument("--version", action="version", version=f"rimbisect {__version__}")
     sub = parser.add_subparsers(dest="command", required=True)
 
-    bisect = sub.add_parser("bisect", parents=[common, trial_opts],
-                            help="run the game on halves of your mod list until the culprit is found")
-    bisect.add_argument("--pick", type=int, metavar="N", help="hunt error N from the full list's errors without asking")
+    what = "run the game on halves of your mod list until the culprit is found"
+    bisect = sub.add_parser("bisect", parents=[common, trial_opts], help=what, description=what)
+    bisect.add_argument("--pick", type=_above_zero(int), metavar="N",
+                        help="hunt error N from the full list's errors without asking")
     bisect.add_argument("--keep", action="append", default=[], metavar="ID[,ID]",
                         help="packageIds to load in every trial (Core and DLCs always are)")
-    bisect.add_argument("--since", metavar="DATE", help="first try the list without mods changed after DATE")
+    bisect.add_argument("--since", metavar="DATE",
+                        help="first try the list without mods changed after DATE, like 2026-09-01 or 2026-09-01T18:30")
     bisect.add_argument("--ignore-last-good", action="store_true",
                         help="do not try the mods changed since the last good run first")
-    bisect.add_argument("--repeats", type=int, default=1, metavar="N",
+    bisect.add_argument("--repeats", type=_above_zero(int), default=1, metavar="N",
                         help="run a passing list up to N times before trusting it, for errors that come and go")
     bisect.add_argument("--crash-is-fail", action="store_true",
-                        help="count a crash or unexpected exit as reproducing the problem")
+                        help="count a crash, an early exit or a map that fails to generate as the error")
     bisect.set_defaults(func=cmd_bisect)
 
-    check = sub.add_parser("check", parents=[common, trial_opts],
-                           help="run the full list once and, if it gets through, save it as the last good one")
+    what = "run the full list once and, if it gets through, save it as the last good one"
+    check = sub.add_parser("check", parents=[common, trial_opts], help=what, description=what)
     check.set_defaults(func=cmd_check)
 
-    mods = sub.add_parser("mods", parents=[common], help="show the active mod list as rimbisect reads it")
+    what = "show the active mod list as rimbisect reads it, with warnings"
+    mods = sub.add_parser("mods", parents=[common], help=what, description=what)
     mods.set_defaults(func=cmd_mods)
     return parser
 

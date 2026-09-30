@@ -81,6 +81,8 @@ def test_pass_writes_an_isolated_config(launcher, monkeypatch, tmp_path):
     ("error", CRITERION, FAIL, "Widget_12"),
     ("logline", Criterion(pattern=re.compile("rimbisectNoSuchField")), FAIL, "XML error"),
     ("gave_up", CRITERION, CRASH, "Error generating map"),
+    ("fallback", CRITERION, CRASH, "fell back to Core alone"),
+    ("exit_unterminated", Criterion(pattern=re.compile("rimbisectNoSuchField")), FAIL, "no newline"),
     ("hang", Criterion(slower_than=0.5), FAIL, "map not ready after 0.5s"),
     ("slow_map", Criterion(slower_than=30), PASS, "map ready after"),
 ])
@@ -117,7 +119,8 @@ def test_log_resets_are_counted(launcher, monkeypatch):
 
 
 def test_windows_the_probe_closed_are_recorded(launcher, monkeypatch):
-    trial = run(launcher, monkeypatch, "paused")
+    # The probe logs the window's name too, which is not the game's error.
+    trial = run(launcher, monkeypatch, "paused", Criterion(pattern=re.compile("HugsLib")))
     assert trial.outcome == PASS and trial.closed == ["HugsLib.News.Dialog_UpdateFeatures"]
 
 
@@ -161,11 +164,15 @@ def test_mods_the_game_did_not_load(launcher, monkeypatch):
     assert "did not load 1 of the mods it was given (ludeon.rimworld)" in third.excerpt
 
 
-def test_an_error_from_a_list_the_game_did_not_load_is_no_answer(launcher, monkeypatch):
+@pytest.mark.parametrize("scenario, criterion", [
+    ("error", CRITERION),
+    ("late_start", Criterion(pattern=re.compile("rimbisectNoSuchField"))),  # logged before the probe reports
+])
+def test_an_error_from_a_list_the_game_did_not_load_is_no_answer(launcher, monkeypatch, scenario, criterion):
     monkeypatch.setenv("FAKE_RUNNING", f"{CORE},author.mod,{PROBE_ID}")
     assert run(launcher, monkeypatch, "pass").outcome == PASS
     monkeypatch.setenv("FAKE_RUNNING", PROBE_ID)
-    trial = run(launcher, monkeypatch, "error")
+    trial = run(launcher, monkeypatch, scenario, criterion)
     assert trial.outcome == UNRESOLVED and "did not load" in trial.excerpt
 
 

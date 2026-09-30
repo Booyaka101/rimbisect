@@ -327,12 +327,11 @@ namespace RimbisectProbe
             foreach (Window window in Find.WindowStack.Windows.Where(w => w.forcePause).ToList())
             {
                 string name = window.GetType().FullName;
-                if (closed.Add(name))
+                if (Find.WindowStack.TryRemove(window, false) && closed.Add(name))
                 {
                     Log.Message("RIMBISECT_CLOSED " + name);
                     Probe.Emit("closed", name, 1);
                 }
-                Find.WindowStack.TryRemove(window, false);
             }
             if (time.CurTimeSpeed == TimeSpeed.Paused)
             {

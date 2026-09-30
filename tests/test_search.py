@@ -109,12 +109,35 @@ def test_results_are_cached_by_mod_set():
     assert len(keys) == len(set(keys))
 
 
-def locate_all(rule, n=64, deps=DEPS):
+def locate_all(rule, n=64, deps=DEPS, changed=None):
     order = make_order(n, deps)
     game = FakeGame(order, rule)
     search = Search(order, game, CRITERION, keep={CORE}, log=lambda _: None)
     search.record(order.order[1:], True)
-    return search.locate_all(order.order[1:]), search, game
+    return search.locate_all(order.order[1:], changed), search, game
+
+
+def test_a_second_cause_among_the_changed_mods_is_found():
+    causes, _, _ = locate_all(lambda mods: "m03" in mods or "m12" in mods, n=16, deps={}, changed=["m12"])
+    assert causes == [{"m03"}, {"m12"}]
+
+
+def test_a_changed_alternative_dependency_does_not_frame_an_unchanged_mod():
+    found, _ = search_for(lambda mods: "m12" in mods, n=16, deps={"m04": ["m12|m13"]}, changed=["m11", "m12"])
+    assert found == {"m12"}
+
+
+@pytest.mark.parametrize("culprit", ["m01", "m02"])
+def test_mods_that_need_each_other(culprit):
+    causes, _, _ = locate_all(lambda mods: culprit in mods, n=6, deps={"m01": ["m02"], "m02": ["m01"]})
+    assert len(causes) == 1 and causes[0] <= {"m01", "m02"}
+
+
+def test_an_error_that_does_not_show_again_is_not_blamed_on_the_mods_left():
+    with pytest.raises(Inconclusive) as info:
+        locate_all(lambda mods: False, n=16)
+    assert "do not show the error on their own" in str(info.value)
+    assert "--repeats" in info.value.advice
 
 
 def test_a_culprit_that_is_also_an_alternative_is_not_loaded_again():
@@ -149,14 +172,16 @@ def test_removing_a_culprit_removes_its_dependents_before_confirming():
     assert not {"m05", "m10"} & set(game.runs[-1])
 
 
-@pytest.mark.parametrize("outcome, label", [(UNRESOLVED, "no answer, again"), (CRASH, "crashed, again")])
-def test_a_timeout_or_a_crash_is_run_again(outcome, label):
+@pytest.mark.parametrize("first, label", [([UNRESOLVED], "no answer, again"), ([CRASH], "crashed, again"),
+                                          ([UNRESOLVED, CRASH], "crashed, again")])
+def test_a_timeout_or_a_crash_is_run_again(first, label):
     seen = []
 
     def rule(mods):
         seen.append(frozenset(mods))
-        if seen.count(frozenset(mods)) == 1 and len(mods) < 40:
-            return outcome
+        runs = seen.count(frozenset(mods))
+        if runs <= len(first) and len(mods) < 40:
+            return first[runs - 1]
         return "m33" in mods
 
     causes, _, game = locate_all(rule)
