@@ -1,10 +1,11 @@
 # rimbisect progress
 
-State on 2026-09-30: version 0.2.2, the sixth review round's fixes and small guided-mode
-additions (below) on top of 0.2.1's review fixes and 0.2.0's `resume`, `--save`,
-standalone `rimbisect.exe` and error search by text. 0.2.1 is released:
-https://github.com/Booyaka101/rimbisect/releases/tag/v0.2.1 (commit 7770802) and
-https://pypi.org/project/rimbisect/0.2.1/.
+State on 2026-09-30: version 0.2.2 is released, the sixth review round's fixes and small
+guided-mode additions (below) on top of 0.2.1's review fixes and 0.2.0's `resume`, `--save`,
+standalone `rimbisect.exe` and error search by text.
+https://github.com/Booyaka101/rimbisect/releases/tag/v0.2.2 (commit 7b15fa9, CI green,
+with the exe CI built from that commit) and https://pypi.org/project/rimbisect/0.2.2/,
+which installs into a fresh venv and runs.
 
 ## Verified
 
