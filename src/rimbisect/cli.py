@@ -10,6 +10,7 @@ import os
 import re
 import shutil
 import sys
+import time
 import traceback
 from contextlib import contextmanager
 from dataclasses import dataclass
@@ -22,11 +23,22 @@ from .install import EXE_NAME, Game, default_config_dir, find_game, process_runn
 from .modlist import PROBE_FOLDER, LoadOrder, ModsConfig, folder_mtime, read_mods_config, scan_mods
 from .search import Inconclusive, Search, run_answered
 from .signature import Criterion, ErrorGroup, group_errors
-from .trial import CRASH, FAIL, PASS, GameLauncher, Trial, install_probe, remove_probe
+from .trial import CRASH, FAIL, PASS, UNRESOLVED, GameLauncher, Trial, install_probe, remove_probe
+
+
+# A run that took longer than this many seconds rings the terminal bell when it ends.
+LONG_RUN = 300
 
 
 def log(message: str) -> None:
     print(message, file=sys.stderr, flush=True)
+
+
+def _title(text: str) -> None:
+    """The console window's title, which shows on the taskbar."""
+    if os.name == "nt" and sys.stderr.isatty():
+        import ctypes
+        ctypes.windll.kernel32.SetConsoleTitleW(text)
 
 
 @dataclass
@@ -413,10 +425,15 @@ def cmd_bisect(args, resumed: tuple[Path, dict] | None = None) -> int:
             criterion = hunted
             steps = math.ceil(math.log2(len(candidates))) if len(candidates) > 1 else 0
             # Offsets measured with acceptance/simulate.py at 64, 200 and 400 mods.
-            log(f"the full list took {baseline.duration:.0f}s; expect about {steps + 3} more trials "
-                f"for a single culprit, {2 * steps + 6} for two mods that only fail together")
+
+            def progress(message: str) -> None:
+                log(message)
+                _title(f"rimbisect: {len(launcher.trials)} of about {steps + 4} to {2 * steps + 7} trials")
+
+            progress(f"the full list took {baseline.duration:.0f}s; expect about {steps + 3} more trials "
+                     f"for a single culprit, {2 * steps + 6} for two mods that only fail together")
             search = Search(setup.order, journal, criterion, keep, repeats=args.repeats,
-                            crash_is_fail=args.crash_is_fail, log=log)
+                            crash_is_fail=args.crash_is_fail, log=progress)
             search.record(candidates, True)
             causes = search.locate_all(candidates, changed)
         except KeyboardInterrupt:
@@ -494,6 +511,16 @@ def _resume(run_dir: Path, args) -> int:
                             "Resume it with --repeats or --timeout to try again from there.")
     saved = _parser().parse_args(["bisect"])
     resume.restored_args(state, saved)
+    if args.repeats is not None and args.repeats < saved.repeats:
+        raise UserError(f"this run already runs each passing list up to {saved.repeats} times; "
+                        "--repeats can only go up")
+    trials = resume.read_trials(run_dir / resume.TRIALS_FILE)
+    # A trial without an answer is run again anyway; otherwise the recorded trials give the
+    # same answer again unless passing lists are run more often.
+    more = args.repeats is not None and args.repeats > saved.repeats
+    if state.get("finished") and not more and trials and trials[-1].outcome != UNRESOLVED:
+        raise UserError(f"the same options would stop this run the same way; resume it with --repeats higher "
+                        f"than {saved.repeats}")
     if args.pick is not None and saved.pick not in (None, args.pick):
         raise UserError(f"this run already hunts error {saved.pick} of the full list; "
                         "start a new run to hunt another")
@@ -647,11 +674,10 @@ def cmd_guided(args) -> int:
         "the computer meanwhile, but leave the game windows it opens alone. Ctrl+C stops it, and\n"
         "opening rimbisect again goes on from there.\n")
     parser = _parser()
-    unfinished = resume.latest_unfinished(_workdir(args) / "runs")
-    if unfinished and _ask(f"There is an unfinished run ({resume.progress(unfinished)}). "
-                           "Go on with it? [Y/n] ").lower() != "n":
+    offer = _guided_offer(_workdir(args) / "runs", parser)
+    if offer and _ask(f"{offer[1]} [Y/n] ").lower() != "n":
         try:
-            return _guided_end(_resume(unfinished, parser.parse_args(["resume"])))
+            return _guided_end(_resume(offer[0], offer[2]), offer[0])
         except resume.StaleRun as exc:
             log(f"{exc}, so a new run starts.\n")
     bisect = parser.parse_args(["bisect"])
@@ -670,16 +696,45 @@ def cmd_guided(args) -> int:
             break
         except UserError as exc:
             log(str(exc))
-    return _guided_end(cmd_bisect(bisect))
+    code = cmd_bisect(bisect)
+    return _guided_end(code, resume.latest(_workdir(bisect) / "runs")[0])
 
 
-def _guided_end(code: int) -> int:
+def _guided_offer(runs: Path, parser) -> tuple[Path, str, argparse.Namespace] | None:
+    """The newest run, what to ask about it and the resume options, when it did not finish
+    or stopped without an answer. Only options that can change that answer are offered."""
+    newest = resume.latest(runs)
+    if newest is None:
+        return None
+    run_dir, state = newest
+    options = parser.parse_args(["resume"])
+    if not state.get("finished"):
+        return run_dir, f"There is an unfinished run ({resume.progress(run_dir)}). Go on with it?", options
+    if state.get("status") != report.INCONCLUSIVE:
+        return None
+    saved = state["args"]
+    trials = resume.read_trials(run_dir / resume.TRIALS_FILE)
+    if trials and trials[-1].outcome == UNRESOLVED:
+        options.timeout = saved["timeout"] * 2
+        how = f"giving each trial up to {options.timeout:g} minutes"
+    else:
+        options.repeats = saved["repeats"] + 2
+        how = f"running each passing list up to {options.repeats} times"
+    return run_dir, (f"The last run stopped without an answer ({run_dir / 'report.txt'} says why). "
+                     f"Try again from there, {how}?"), options
+
+
+def _guided_end(code: int, run_dir: Path) -> int:
+    """The culprits once more, since the list of trials has pushed them out of view."""
     if code == 0:
-        log("To play without the error, turn the culprits off in the game's Mods screen.")
+        culprits = json.loads((run_dir / "report.json").read_text(encoding="utf-8"))["culprits"]
+        log(f"\nrimbisect found {', '.join(c['name'] for c in culprits)}. To play without the error, turn "
+            f"{'it' if len(culprits) == 1 else 'them'} off in the game's Mods screen.")
     return code
 
 
 def _run(args) -> int:
+    started = time.monotonic()
     try:
         return args.func(args)
     except UserError as exc:
@@ -688,6 +743,10 @@ def _run(args) -> int:
     except KeyboardInterrupt:
         print("rimbisect: interrupted", file=sys.stderr)
         return 130
+    finally:
+        # For whoever went to do something else meanwhile.
+        if time.monotonic() - started > LONG_RUN and sys.stderr.isatty():
+            print("\a", end="", file=sys.stderr, flush=True)
 
 
 def main(argv: list[str] | None = None) -> int:

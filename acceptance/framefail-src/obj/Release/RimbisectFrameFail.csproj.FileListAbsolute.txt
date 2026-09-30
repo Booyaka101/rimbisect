@@ -1,0 +1,7 @@
+D:\Repos\ideas\rimbisect\acceptance\framefail\Assemblies\RimbisectFrameFail.dll
+D:\Repos\ideas\rimbisect\acceptance\framefail-src\obj\Release\RimbisectFrameFail.csproj.AssemblyReference.cache
+D:\Repos\ideas\rimbisect\acceptance\framefail-src\obj\Release\RimbisectFrameFail.GeneratedMSBuildEditorConfig.editorconfig
+D:\Repos\ideas\rimbisect\acceptance\framefail-src\obj\Release\RimbisectFrameFail.AssemblyInfoInputs.cache
+D:\Repos\ideas\rimbisect\acceptance\framefail-src\obj\Release\RimbisectFrameFail.AssemblyInfo.cs
+D:\Repos\ideas\rimbisect\acceptance\framefail-src\obj\Release\RimbisectFrameFail.csproj.CoreCompileInputs.cache
+D:\Repos\ideas\rimbisect\acceptance\framefail-src\obj\Release\RimbisectFrameFail.dll

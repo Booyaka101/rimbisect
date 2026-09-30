@@ -1,20 +1,28 @@
 """Read a mod's About/About.xml.
 
-Lifted from rim-loadorder-agent's ingest/build.py (parse_about), switched to lxml with
-recover=True so the unescaped ampersands and stray tags some authors ship still parse,
-and changed to follow the game on versioned lists: a <fooByVersion><v1.6> block replaces
-<foo> for that version instead of adding to it.
+Lifted from rim-loadorder-agent's ingest/build.py (parse_about), and changed to read the
+file the way the game does (Verse.ModMetaData): text decoded like File.ReadAllText, tags
+matched in any case, and a file it cannot parse, or one without a packageId, gives the id
+the game makes up. A <fooByVersion><v1.6> block replaces <foo> for that version instead
+of adding to it.
 """
 
 from __future__ import annotations
 
+import codecs
 import re
 from dataclasses import dataclass, field
 from pathlib import Path
 
 from lxml import etree
 
-_PARSER = etree.XMLParser(recover=True, remove_comments=True, resolve_entities=False)
+_PARSER = etree.XMLParser(remove_comments=True, resolve_entities=False, encoding="utf-8")
+_LISTS = ("modDependencies", "loadAfter", "forceLoadAfter", "loadBefore", "forceLoadBefore", "incompatibleWith")
+_TAGS = {tag.lower(): tag for tag in ("packageId", "name", "author", "description", "displayName",
+                                      "alternativePackageIds", "supportedVersions", *_LISTS,
+                                      *(tag + "ByVersion" for tag in _LISTS))}
+_BOMS = ((codecs.BOM_UTF32_LE, "utf-32"), (codecs.BOM_UTF32_BE, "utf-32"), (codecs.BOM_UTF8, "utf-8-sig"),
+         (codecs.BOM_UTF16_LE, "utf-16"), (codecs.BOM_UTF16_BE, "utf-16"))
 _WORKSHOP_ID = re.compile(r"(\d{6,})")
 
 
@@ -37,6 +45,7 @@ class Mod:
     load_before: list[str] = field(default_factory=list)
     incompatible_with: list[str] = field(default_factory=list)
     supported_versions: list[str] = field(default_factory=list)
+    problem: str | None = None  # why the game makes up this mod's packageId
 
 
 def _texts(node, tag: str) -> list[str] | None:
@@ -84,20 +93,66 @@ def _published_id(about_dir: Path) -> str | None:
     return match.group(1) if match else None
 
 
-def parse_about(path: Path, version: str, workshop_id: str | None = None, official: bool = False) -> Mod | None:
-    """Parse About.xml; None when it has no packageId (the game skips those too)."""
-    root = etree.parse(str(path), _PARSER).getroot()
-    if root is None:
+def _utf16(text: str) -> memoryview:
+    return memoryview(text.encode("utf-16-le")).cast("H")
+
+
+def _made_up_id(author: str, name: str, description: str) -> str:
+    """GenText.StableStringHash and ConvertToASCII, as ModMetaData.TryParsePackageId uses them."""
+    text = "none"
+    if description:
+        number = 23
+        for unit in _utf16(description):
+            number = (number * 31 + unit) & 0xFFFFFFFF
+        text = str(number - (1 << 32) if number >= 1 << 31 else number).replace("-", "")[:3]
+    ascii_ = lambda part: "".join(chr(u) if u < 0x80 and chr(u).isalnum() else chr(u % 25 + 65)  # noqa: E731
+                                  for u in _utf16(part))
+    return (ascii_(author + text) + "." + ascii_(name)).lower()
+
+
+def _root(path: Path):
+    """The parsed file with tags in the case this module looks for, or None where the game
+    falls back to defaults (no file, or XML it cannot parse)."""
+    try:
+        raw = path.read_bytes()
+    except FileNotFoundError:
         return None
-    package_id = (root.findtext("packageId") or "").strip().lower()
-    if not package_id:
+    codec = next((codec for bom, codec in _BOMS if raw.startswith(bom)), "utf-8")
+    try:
+        root = etree.fromstring(raw.decode(codec, errors="replace").encode("utf-8"), _PARSER)
+    except etree.XMLSyntaxError:
         return None
+    for el in root.iter(tag=etree.Element):
+        el.tag = _TAGS.get(el.tag.lower(), el.tag)
+    return root
+
+
+def _inner(root, tag: str, default: str = "") -> str:
+    el = root.find(tag)
+    return default if el is None else "".join(el.itertext())
+
+
+def parse_about(path: Path, version: str, workshop_id: str | None = None, official: bool = False) -> Mod:
+    """Parse About.xml, which may not exist; the game still loads such a folder as a mod."""
     folder = path.parent.parent
+    root = _root(path)
+    if root is None:
+        root = etree.Element("ModMetaData")
+        problem = "About.xml could not be read" if path.exists() else "there is no About/About.xml"
+    else:
+        problem = None
+    name = _inner(root, "name") or (f"Workshop mod {folder.name}" if workshop_id else folder.name)
+    package_id = _inner(root, "packageId").strip().lower()
+    if not package_id:
+        package_id = _made_up_id(_inner(root, "author", "Anonymous"), name,
+                                 _inner(root, "description", "No description provided."))
+        problem = problem or "About.xml has no packageId"
     if workshop_id is None:
         workshop_id = _published_id(path.parent) or (folder.name if _WORKSHOP_ID.fullmatch(folder.name) else None)
     return Mod(
         package_id=package_id,
-        name=(root.findtext("name") or "").strip() or folder.name,
+        name=name.strip(),
+        problem=problem,
         folder=folder,
         workshop_id=workshop_id,
         official=official,

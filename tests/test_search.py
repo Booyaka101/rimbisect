@@ -139,7 +139,7 @@ def test_an_error_that_does_not_show_again_stops_the_search_early():
     search.record(game.order.order[1:], True)
     with pytest.raises(Inconclusive) as info:
         search.locate_all(game.order.order[1:])
-    assert "did not show again with the full list" in str(info.value)
+    assert "did not show again" in str(info.value)
     assert "--repeats" in info.value.advice
     assert len(game.runs) <= 15
 
@@ -155,6 +155,42 @@ def test_a_mod_left_in_by_a_flaky_pass_is_dropped():
     causes, _, game = locate_all(rule, deps={})
     assert causes == [{"m33"}]
     assert any(t.label == "without one culprit" for t in game.trials)
+
+
+def test_leaving_one_out_does_not_trust_a_flaky_pass_again():
+    seen = []
+
+    def rule(mods):
+        # m33 alone passes the first time, which made m32 look needed too.
+        alone = {m for m in mods if m.startswith("m")} == {"m33"}
+        seen.append(alone)
+        return "m33" in mods and not (alone and seen.count(True) == 1)
+
+    causes, _, _ = locate_all(rule, deps={})
+    assert causes == [{"m33"}]
+
+
+def flaky_once(culprit, big=50):
+    """The culprit's error, plus one failure of the first big list without it."""
+    seen = []
+
+    def rule(mods):
+        if culprit in mods:
+            return True
+        seen.append(len(mods) > big)
+        return seen.count(True) == 1 and seen[-1]
+    return rule
+
+
+def test_a_failure_that_does_not_repeat_after_the_first_cause_stops_the_search():
+    with pytest.raises(Inconclusive) as info:
+        locate_all(flaky_once("m33"), deps={})
+    assert "did not show again" in str(info.value)
+
+
+def test_a_failure_without_the_changed_mods_that_does_not_repeat_stops_the_search():
+    with pytest.raises(Inconclusive):
+        locate_all(flaky_once("m50"), deps={}, changed=["m50"])
 
 
 def test_a_crash_that_repeats_does_not_count_as_a_pass():

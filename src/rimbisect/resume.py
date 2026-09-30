@@ -199,13 +199,19 @@ def progress(run_dir: Path) -> str:
     return f"started {started}, {len(read_trials(run_dir / TRIALS_FILE))} trials done"
 
 
-def latest_unfinished(runs: Path) -> Path | None:
-    """The newest run, if it did not finish. A run that finished after it makes an older
-    unfinished one moot."""
+def latest(runs: Path) -> tuple[Path, dict] | None:
+    """The newest run and its state."""
     if not runs.is_dir():
         return None
     for run_dir in sorted((p for p in runs.iterdir() if (p / RUN_FILE).is_file()), reverse=True):
         state = _read(run_dir)
         if state:
-            return None if state.get("finished") else run_dir
+            return run_dir, state
     return None
+
+
+def latest_unfinished(runs: Path) -> Path | None:
+    """The newest run, if it did not finish. A run that finished after it makes an older
+    unfinished one moot."""
+    newest = latest(runs)
+    return newest[0] if newest and not newest[1].get("finished") else None

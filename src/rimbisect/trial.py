@@ -122,8 +122,7 @@ def prepare_savedata(real_config: Path, savedata: Path, save: Path | None = None
     plus the SETTINGS_FOLDERS beside it. Done before every trial, so nothing a mod writes
     during one trial carries over into the next. With a save, it is the one the game loads."""
     config = savedata / "Config"
-    for name in ("Config", *SETTINGS_FOLDERS):
-        shutil.rmtree(savedata / name, ignore_errors=True)
+    shutil.rmtree(savedata, ignore_errors=True)
     if real_config.is_dir():
         shutil.copytree(real_config, config, dirs_exist_ok=True,
                         ignore=lambda d, names: [n for n in names if Path(d) == real_config and n == "ModsConfig.xml"])
@@ -137,7 +136,7 @@ def prepare_savedata(real_config: Path, savedata: Path, save: Path | None = None
         # Left by the "disable dev mode for good" button. The game then turns dev mode off
         # before its UI exists, which throws and leaves it broken.
         (config / "DevModeDisabled").unlink(missing_ok=True)
-        (savedata / "Saves").mkdir(exist_ok=True)
+        (savedata / "Saves").mkdir(parents=True, exist_ok=True)
         shutil.copyfile(save, savedata / "Saves" / AUTOSTART)
     return config
 
@@ -283,9 +282,11 @@ class GameLauncher:
         self.not_loaded_at_first: set[str] | None = None
         self.proc: subprocess.Popen | None = None
         self.job: Job | None = None
+        self.stopped = False
 
     def stop(self) -> None:
         """End the game of the trial that is running, from another thread."""
+        self.stopped = True
         if self.job is not None:
             self.job.close()
         elif self.proc is not None:
@@ -419,6 +420,8 @@ class GameLauncher:
                 except subprocess.TimeoutExpired:
                     pass
             kill_tree(proc, job)
+        if self.stopped:
+            trial.outcome, trial.excerpt = UNRESOLVED, "stopped"
         return trial
 
     def _check_loaded(self, trial: Trial, running: list[str]) -> str | None:
