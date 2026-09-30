@@ -133,11 +133,35 @@ def test_mods_that_need_each_other(culprit):
     assert len(causes) == 1 and causes[0] <= {"m01", "m02"}
 
 
-def test_an_error_that_does_not_show_again_is_not_blamed_on_the_mods_left():
+def test_an_error_that_does_not_show_again_stops_the_search_early():
+    game = FakeGame(make_order(64), lambda mods: False)
+    search = Search(game.order, game, CRITERION, keep={CORE}, log=lambda _: None)
+    search.record(game.order.order[1:], True)
     with pytest.raises(Inconclusive) as info:
-        locate_all(lambda mods: False, n=16)
-    assert "do not show the error on their own" in str(info.value)
+        search.locate_all(game.order.order[1:])
+    assert "did not show again with the full list" in str(info.value)
     assert "--repeats" in info.value.advice
+    assert len(game.runs) <= 15
+
+
+def test_a_mod_left_in_by_a_flaky_pass_is_dropped():
+    seen = []
+
+    def rule(mods):
+        # The first list with m33 in it passes although it should fail.
+        seen.append("m33" in mods)
+        return "m33" in mods and seen.count(True) > 1
+
+    causes, _, game = locate_all(rule, deps={})
+    assert causes == [{"m33"}]
+    assert any(t.label == "without one culprit" for t in game.trials)
+
+
+def test_a_crash_that_repeats_does_not_count_as_a_pass():
+    # The error comes from the base game; m20 crashes it unless m40 is loaded.
+    causes, search, game = locate_all(lambda mods: CRASH if "m20" in mods and "m40" not in mods else True)
+    assert causes == [] and search.base_fails
+    assert len(game.runs) <= 20
 
 
 def test_a_culprit_that_is_also_an_alternative_is_not_loaded_again():

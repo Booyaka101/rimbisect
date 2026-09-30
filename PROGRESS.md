@@ -48,6 +48,16 @@ All on the owner's PC: RimWorld 1.6.4871 (Steam, `D:\SteamLibrary`), i9-14900K, 
   on 1.6.4850 and loaded with its missing-class errors each time. Passing trials ran
   their 300 ticks within a second or two of the map being ready. `check` on the same list
   without `--save` passed, and the original save's timestamp is unchanged.
+- **Save mode, 0.2.1.** The same savefail list again after the probe moved to a game
+  component: found in 8 trials, passes ran about 1700 ticks with `--settle 5` because of
+  the new five real seconds floor, and the save copy was deleted at the end. With dev
+  mode forced off the game stayed at the main menu and the trial ended as a crash in
+  12.8s instead of the 300s timeout. With the game's `DevModeDisabled` file present,
+  which used to leave it broken, the save loaded.
+- **Console closed mid-trial.** A `check` on that list, with Windows' close event sent to
+  rimbisect while the game was running: rimbisect exited (0xC000013A) within the wait,
+  no RimWorld process was left and the probe folder was gone from `Mods`. The same
+  `check` left alone passed in 25.2s and numbered its one error.
 - **Standalone exe.** PyInstaller onefile, 13.8 MB, built from a clean venv (the global
   environment left the probe out and pulled in unrelated packages). It ran `mods` and the
   resume above against the real install. Started in its own console it waits in guided
@@ -56,7 +66,7 @@ All on the owner's PC: RimWorld 1.6.4871 (Steam, `D:\SteamLibrary`), i9-14900K, 
   had 0 game ticks in trials 2 and 12: HugsLib's update news and Brrainz's feature
   dialog (Achtung, Camera+) paused the new game, so those trials only "passed" by the
   one-minute real-time cap. The probe now closes windows that force a pause and sets the
-  speed to normal. A check on the same 103 mod list then ran 1200 ticks and passed in
+  speed to Superfast. A check on the same 103 mod list then ran 1200 ticks and passed in
   93.8s instead of 158s, and the report named both windows.
 - **Native crash.** The first attempt of that 103 mod check died in map generation with
   an access violation in ntdll (0xC0000005, in the Windows event log), on a list that
@@ -87,7 +97,7 @@ All on the owner's PC: RimWorld 1.6.4871 (Steam, `D:\SteamLibrary`), i9-14900K, 
   RimWorld process was left. The probe folder was left in `Mods`, as the README says.
 - After every finished run the probe folder was gone from `<game>\Mods` and no RimWorld
   process was left. The real `ModsConfig.xml` and `Prefs.xml` were never written.
-- `python -m pytest`: 193 passed. `python -m pyflakes src tests acceptance/*.py` clean.
+- `python -m pytest`: 211 passed. `python -m pyflakes src tests acceptance/*.py` clean.
 - `python -m build` makes the wheel and sdist. The wheel's `RimbisectProbe.dll` matches
   `src/` by hash, installs into a fresh venv, and `rimbisect --version` and `mods` run
   from it.
@@ -158,6 +168,40 @@ Last round (search, trial loop and CLI, three reviewers):
   gave tracebacks or odd runs. `--workdir` was accepted by `mods`, which ignores it.
   The report shows the `--since` date.
 
+Fifth round, for 0.2.1 (search, trial loop and probe, CLI and docs, three reviewers).
+Every one of the 12 tests added or changed was checked to fail on the 0.2.0 code.
+
+- Flaky errors: a reviewer's scenario where the error never shows again after the
+  baseline ran 189 trials before giving up; the full list is now run again at the first
+  interaction split and the run stops as inconclusive after 9. A flaky first pass that
+  left an innocent mod in a pair is caught by leaving each member out in turn. A list
+  that only crashed named 17 bogus causes; a crash no longer counts as a pass there.
+- Save mode: `Config/DevModeDisabled` (the "disable dev mode for good" button) breaks
+  the game at startup once dev mode is forced on; it is deleted from the copy. A save
+  that doesn't load left the game at the main menu until the timeout. Game time was
+  counted on the current map only.
+- Signatures: framework frames (`System.`, `UnityEngine.`, `Mono.`) and RimWorld's
+  `[Ref X] Duplicate stacktrace` lines split one error into several or merged unrelated
+  ones.
+- CLI: closing the console window left the probe in `Mods`; two runs on one game fought
+  over it; `resume` could not change `--repeats` or `--timeout`, nor retry an
+  inconclusive run; a killed write could corrupt `run.json`; the save copy was never
+  deleted; a run from another rimbisect version was resumed.
+- Docs: the exe needs `.\` in PowerShell, SmartScreen and antivirus, the pair estimates
+  in the README were low (`acceptance/simulate.py` now gives 18.2/23, 21.9/28 and
+  24.4/30 mean/max trials for 64, 200 and 400 mods).
+
+Left as they are, on purpose:
+
+- No cap on the number of causes. Each group must fail on its own, and lists with many
+  real causes (missing textures from several mods) exist.
+- Texture warnings for different files are not merged into one error.
+- Inferring a trial's result from the ones around it to save a run. Too easy to get
+  wrong for a few minutes saved.
+- `DebugSettings.pauseOnError` is left alone; it is off unless a player turns it on.
+- A flake that lands on the leave-one-out check itself can still leave a pair. Only
+  `--repeats` catches that.
+
 Not changed: `Translate()` on the probe's timer thread. It only runs when an error
 dialog is already open, and that dialog's title was translated on the main thread.
 
@@ -171,6 +215,8 @@ dialog is already open, and that dialog's title was translated on the main threa
 - The exe on another PC, and what SmartScreen does with it.
 - `--save` with a save made on the same big list it is bisecting.
 - The 400 mod timing in the README is an estimate from the 200 mod run.
+- The trial counts from `acceptance/simulate.py` assume a game that fails exactly when
+  the culprits are loaded. Real lists with flaky errors take more.
 - If the probe fails to write one event, it drops its writer and opens a new one on the
   next event without disposing the old stream. Harmless for a process that exits soon.
 - Non-Steam installs, other RimWorld versions than 1.6.4871, Windows 10.
@@ -179,7 +225,9 @@ dialog is already open, and that dialog's title was translated on the main threa
 
 1. First distribution step, below.
 2. Later releases: bump the version, wait for CI on the exact commit, then
-   `python -m build`, `twine upload dist/*`, tag and `gh release create`.
+   `python -m build`, `twine upload dist/*`, tag, download the `exe` artifact of that
+   commit's CI run (`gh run download <id> -n exe`) and `gh release create` with the
+   wheel, sdist and exe.
 
 To run the acceptance again: `python acceptance/stage.py install --size 200 --position 150`
 (or `--mod mapfail`, `--mod flood`, `--mod savefail`) installs the test mod and writes the list to

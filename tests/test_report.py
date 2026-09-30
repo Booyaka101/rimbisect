@@ -43,9 +43,14 @@ def test_causes_found_before_the_kept_mods_failed_alone(tmp_path):
 
 
 def test_crash_note_depends_on_crash_is_fail(tmp_path):
-    trials = [Trial(1, "baseline", [], CRASH)]
-    assert any("1 trial crashed" in note for note in build(tmp_path, trials)["notes"])
+    trials = [Trial(1, "bisect", [], CRASH), Trial(2, "crashed, again", [], CRASH)]
+    assert any(note.startswith("1 trial crashed twice") for note in build(tmp_path, trials)["notes"])
     assert not any("crashed" in note for note in build(tmp_path, trials, crash_is_fail=True)["notes"])
+
+
+def test_a_crash_that_went_away_on_the_second_try_is_not_a_note(tmp_path):
+    trials = [Trial(1, "bisect", [], CRASH), Trial(2, "crashed, again", [], PASS)]
+    assert not any("crashed" in note for note in build(tmp_path, trials)["notes"])
 
 
 def test_a_crash_shows_how_the_game_exited_and_what_it_logged_last(tmp_path):
@@ -73,3 +78,4 @@ def test_a_passing_check_still_mentions_the_errors_it_logged(tmp_path):
                         trials=[Trial(1, "check", [], PASS)], errors=[ErrorGroup("sig", "Could not find X", 3)],
                         warnings=[])
     assert any("1 distinct error" in note for note in data["notes"])
+    assert "     1.     3x  Could not find X" in report.render_text(data)

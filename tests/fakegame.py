@@ -75,3 +75,6 @@ class FakeGame:
         trial = Trial(self.numbered, label, list(mods), outcome, 1.0, errors=errors)
         self.trials.append(trial)
         return trial
+
+    def stop(self) -> None:
+        pass

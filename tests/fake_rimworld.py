@@ -42,8 +42,11 @@ if scenario == "save":
     with open(os.path.join(savedata, "Saves", "autostart.rws"), encoding="utf-8") as fh:
         save = fh.read()
     # The real game only loads autostart in dev mode, and -quicktest would start a new colony.
-    if "<devMode>True</devMode>" in prefs and "-quicktest" not in args:
-        emit("error", f"loaded {save}, pauseOnLoad {'<pauseOnLoad>False' in prefs}")
+    dev_mode = "<devMode>True</devMode>" in prefs and not os.path.exists(
+        os.path.join(savedata, "Config", "DevModeDisabled"))
+    if dev_mode and "-quicktest" not in args:
+        emit("error", f"loaded {save}, pauseOnLoad {'<pauseOnLoad>False' in prefs}, "
+                      f"told {os.environ.get('RIMBISECT_SAVE')}")
     emit("map_ready")
     emit("done", "1200")
     say("RIMBISECT_DONE")

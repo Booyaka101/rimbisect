@@ -8,6 +8,7 @@ from pathlib import Path
 
 from . import __version__
 from .modlist import LoadOrder, folder_mtime
+from .search import CRASHED_AGAIN
 from .signature import Criterion, ErrorGroup
 from .trial import CRASH, FAIL, PASS, UNRESOLVED, Trial
 
@@ -86,6 +87,8 @@ def build(*, status: str, run_dir: Path, game, config_path: Path, order: LoadOrd
         fixed_path = run_dir / "ModsConfig.fixed.xml"
         fixed_path.write_text(order.fixed_config(removed), encoding="utf-8")
     counts = {outcome: sum(t.outcome == outcome for t in trials) for outcome in (CRASH, UNRESOLVED)}
+    # A crash that went away when run again did not decide anything.
+    crashed_twice = sum(t.outcome == CRASH and t.label == CRASHED_AGAIN for t in trials)
     notes = []
     if len(causes) > 1:
         notes.append(f"there are {len(causes)} separate causes; the error only goes away when every one is removed")
@@ -98,9 +101,9 @@ def build(*, status: str, run_dir: Path, game, config_path: Path, order: LoadOrd
         notes.append("with these removed, the error still happens with only the kept mods loaded "
                      "(Core, DLCs, --keep and what they need)")
     hunting = status not in (CHECK_PASSED, CHECK_FAILED)
-    if hunting and counts[CRASH] and not crash_is_fail:
-        notes.append(f"{_count(counts[CRASH], 'trial')} crashed; crashes only count as the error "
-                     "with --crash-is-fail")
+    if hunting and crashed_twice and not crash_is_fail:
+        notes.append(f"{_count(crashed_twice, 'trial')} crashed twice in a row and counted as not showing "
+                     "the error; crashes only count as the error with --crash-is-fail")
     if hunting and counts[UNRESOLVED]:
         notes.append(f"{_count(counts[UNRESOLVED], 'trial')} gave no answer; the reason is under each in the list below")
     if status == CHECK_PASSED and errors:
@@ -215,7 +218,8 @@ def render_text(report: dict) -> str:
             out.append(f"  {f['mods']} mods: {pairs}")
     if report["errorsLogged"]:
         out += ["", f"ERRORS LOGGED  {len(report['errorsLogged'])} distinct"]
-        out += [f"  {e['count']:>5}x  {_clip(e['headline'], 150)}" for e in report["errorsLogged"][:15]]
+        out += [f"  {i:>4}. {e['count']:>5}x  {_clip(e['headline'], 150)}"
+                for i, e in enumerate(report["errorsLogged"][:15], 1)]
         if len(report["errorsLogged"]) > 15:
             out.append(f"         ... {len(report['errorsLogged']) - 15} more in report.json")
     if report["warnings"]:
