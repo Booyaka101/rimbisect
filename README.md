@@ -349,6 +349,13 @@ when interrupted.
   found as the set of mods involved. rimbisect does not try other orders.
 - RimWorld has to be closed while it runs, and the machine is busy the whole time.
 
+## See also
+
+[rimsave-xray](https://github.com/Booyaka101/rimsave-xray) looks inside a save
+file instead of the running game: where the bytes are, per section, per mod and
+per component, read-only, with a ranked fix list. rimbisect finds the mod
+behind an error; rimsave-xray shows what your save is carrying.
+
 ## License
 
 MIT
