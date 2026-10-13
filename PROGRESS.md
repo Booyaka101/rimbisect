@@ -1,10 +1,13 @@
 # rimbisect progress
 
-State on 2026-10-13: version 0.3.0 is the Waylith/1.7 readiness release, built and
-verified live on this PC against RimWorld 1.7.4976 rev1043 (Steam `unstable` branch)
-and against a 1.6.4871 snapshot. Not yet published: CI, PyPI and the GitHub release
-are owner steps, same as for 0.2.2 (see "Next steps for the owner" in the 0.2.2
-section below). Everything from the 0.2.2 section down is still true for 1.6.
+State on 2026-10-13: version 0.3.0 is released, the Waylith/1.7 readiness release,
+built and verified live on this PC against RimWorld 1.7.4976 rev1043 (Steam
+`unstable` branch) and against a 1.6.4871 snapshot. Commit 5a068e6, CI green on the
+exact commit (run 38360784574: test 3.11/3.12/3.13, package, exe),
+https://github.com/Booyaka101/rimbisect/releases/tag/v0.3.0 with the wheel, sdist
+and the CI-built exe, and https://pypi.org/project/rimbisect/0.3.0/, which installs
+into a fresh venv and runs. Everything from the 0.2.2 section down is still true
+for 1.6.
 
 ## Waylith/1.7 upgrade, 2026-10-13 (0.3.0)
 
@@ -148,11 +151,9 @@ a single shared resource: nothing automated should run the game while rimbisect 
 
 Next steps for the owner:
 
-1. Publish 0.3.0 as 0.2.2 was published: wait for CI on the exact commit,
-   `python -m build`, `twine upload dist/*`, tag, `gh run download <id> -n exe`,
-   `gh release create` with wheel, sdist and exe. First distribution step is still
-   the r/RimWorld reply drafted in the 0.2.2 section; on 1.7-launch threads it now
-   also answers "which of my mods broke on Waylith".
+1. 0.3.0 is published (see the state line at the top). The remaining distribution
+   step is the r/RimWorld reply drafted in the 0.2.2 section; on 1.7-launch threads
+   it now also answers "which of my mods broke on Waylith".
 2. After any reboot, redo the 1.6 acceptance against the snapshot if it is still
    around (`.phase0\rimworld16`, gitignored; remake it with robocopy from a 1.6
    install if not) to close the regression guard on real hardware.
