@@ -1,5 +1,177 @@
 # rimbisect progress
 
+State on 2026-10-13: version 0.3.0 is the Waylith/1.7 readiness release, built and
+verified live on this PC against RimWorld 1.7.4976 rev1043 (Steam `unstable` branch)
+and against a 1.6.4871 snapshot. Not yet published: CI, PyPI and the GitHub release
+are owner steps, same as for 0.2.2 (see "Next steps for the owner" in the 0.2.2
+section below). Everything from the 0.2.2 section down is still true for 1.6.
+
+## Waylith/1.7 upgrade, 2026-10-13 (0.3.0)
+
+The announcement is real: "Announcing the Waylith Engine and Update 1.7", 2026-10-12
+17:17 UTC, full text via https://store.steampowered.com/feeds/news/app/294100/. 1.7
+moves RimWorld from Unity to Ludeon's in-house Waylith engine and ships on the Steam
+`unstable` branch; main stays 1.6 "for now". Switching the branch needs the owner's
+Steam sign-in (no remembered password; see the 2026-10-13 LESSONS entry), which the
+owner provided around 12:00 on 2026-10-13. SteamDB's patchnote page 403s non-browser
+clients; the store feed carries the same content. rimbisect does not read HugsLib
+gists, so the Standalone Log Publisher edge case needed no work.
+
+Contracts re-derived on the real 1.7 install (buildid 25885806, which is the SteamDB
+patchnote id in the brief), next to what 0.2.2 did on 1.6:
+
+- Exe: `RimWorld.exe` in the root (was `RimWorldWin64.exe`). The root now also holds
+  the whole engine: `Assembly-CSharp.dll`, `UnityStubs.dll` (a Unity compatibility
+  shim), Waylith/Brutal DLLs, a self-contained .NET 10 "WaylithClr" runtime with
+  `RimWorld.runtimeconfig.json`, and `Assets.zip`. No `RimWorldWin64_Data`, no Mono,
+  no UnityPlayer.dll. A `Rendering` folder appeared; `Source` is gone.
+- Version: `Version.txt` is unchanged in shape, "1.7.4976 rev1043". The game's own log
+  banner prints the assembly version (1.0.0.0) instead, so `Version.txt` stays the
+  source of truth. In-game mod loading keys `<v1.7>` blocks by short version as before.
+- Launch args: `-savedatafolder` and `-quicktest` work exactly as on 1.6 (quicktest
+  generated a map in about 20s on a 16-mod list, Core+DLCs in about 26s). `-logFile`
+  is accepted on the command line but does nothing.
+- Log: always `%USERPROFILE%\AppData\LocalLow\Ludeon Studios\RimWorld by Ludeon
+  Studios\Logs\Player.log` (a new `Logs` subfolder; 1.6 wrote Player.log next to
+  Config and honored -logFile). The game rewrites the file from scratch at every
+  start; there is no Player-prev rotation. Line format is
+  `2026-10-13 12:19:40.655  INFO [Verse] message` (level right-aligned to five
+  characters, a category in brackets, engine lines followed by multiline `at ...`
+  stack blocks). Verse's own message texts are unchanged, including
+  `RIMBISECT_DONE`, `XML error: ...` and the load-fallback lines.
+- Player data: the same LocalLow Config folder, read the same way; a `HugsLib`
+  folder, `HardwareProfile`, `ShaderCache` and `TextureCache` appear under the
+  `-savedatafolder`, so trials stay isolated.
+- Mods: `Data`, `Mods` and workshop resolution are unchanged; the 193 local copies
+  and official expansions all scanned the same. Mods listing only 1.6 load anyway,
+  logged as "(incompatible version)" in a warning list, matching the announcement.
+- Probe: the 0.2.2 net48 DLL loads and works unchanged, because WaylithClr redirects
+  `UnityEngine*` assembly references to UnityStubs (`WaylithClr.AssemblyNameRedirects`
+  in RimWorld.runtimeconfig.json) and keeps the Verse members the probe reflects into.
+  Verified live: the started event with the loaded mod list, error events (including
+  repeats), map_ready, done with tick counts, window closing and `Root.Shutdown()`
+  with a clean exit 0. The probe and the acceptance test mods now also list 1.7 in
+  supportedVersions to keep that warning list empty.
+
+What 1.7-unstable currently does with real mods, observed live (useful context for
+users, all of it the game's side): Prepatcher dies with "Not available on non-Mono
+runtime", the old bundled Harmony fails to initialize ("CoreCLR version 10.0.10 is
+not supported"), VEF throws NullReference in OnGUI every frame when its patches fail,
+XML-only mods load fine. A stuck-at-menu 1.7 game can also throw
+`Root level exception` in Update/OnGUI every frame and grow Player.log by hundreds of
+MB per minute; rimbisect's quicktest path bypasses the menu, and its one-game-at-a-time
+gate now checks both exe names.
+
+Verified end to end, 2026-10-13, all on this PC:
+
+- **1.7 bisect, unattended.** `python -m rimbisect bisect --config
+  acceptance\work\ModsConfig-brokendef17-16.xml --workdir .phase0\rb17 --match
+  rimbisectNoSuchField` (16 mods: Core, the five DLCs, nine XML-only local mods, and
+  the brokendef test mod at position 12; the list is written by `.phase0/stage17.py`
+  into `acceptance/work/ModsConfig-brokendef17-16.xml`). Run 2026-10-13_12-41-11:
+  5 trials, 1m3s, exit 0, CULPRIT `rimbisect.acceptance.brokendef`, confirm trial
+  PASS. A first run (2026-10-13_12-38-32) also exercised the crash-retry path for
+  real: trial 2 exited early (0xffffffff), was run again, PASS. FAIL trials take
+  3-4s (the XML error lands during load), PASS trials about 26s. Output is in
+  README.md.
+- **1.7 version detection.** `python -m rimbisect mods --json` on the auto-discovered
+  install prints `game: 1.7.4976 rev1043`.
+- **1.7 log fixtures.** `tests/fixtures/player17-clean.log` (Core+DLCs+probe,
+  map_ready and done, one engine ERROR line: the Vulkan loader's complaint about the
+  Rockstar Social Club layer JSON) and `tests/fixtures/player17-erroring.log` (the
+  16-mod list with brokendef: the XML error, probe lines, done). Both captured from
+  real runs on 2026-10-13 and used by `tests/test_waylith_log.py`.
+- **1.6 regression.** The morning baseline: the same 16-mod check against the
+  `.phase0\rimworld16` snapshot on 0.2.2 found the error in 17.4s (run
+  2026-10-13_08-58-35, also the first `--game` run against a folder outside Steam;
+  the 200-mod list resolves entirely inside the game folder: 193 local copies, 6
+  official, 0 workshop). Later the same day the snapshot's game started hanging
+  before mod loading on this machine, identically under 0.2.2 and 0.3.0 and when
+  launched directly with no rimbisect involved; see the incident note below. The
+  200-mod bisect on the snapshot could therefore not be repeated today; the 224
+  pre-existing tests (all green) plus the identical-behavior comparison stand in for
+  it until the machine is rebooted.
+- `python -m pytest`: 244 passed at that point, the 224 pre-existing tests staying
+  green, plus the new `test_install.py`, `test_waylith_log.py` and the Waylith
+  trial tests in `test_trial.py` (245 after the seventh round below).
+  pyflakes clean.
+
+Not verified live on 1.7 (1.6 equivalents are covered in the 0.2.2 list below):
+`--save` mode (the probe's still-at-menu watchdog and the autostart save flow are
+engine-agnostic and the probe itself was verified, but no save was loaded on 1.7),
+`resume` across a 1.7 run, and a Workshop-mods list (Steam was signed out all day;
+local and official mods only).
+
+## Seventh review round, 2026-10-13 (still 0.3.0, before publishing)
+
+Three reviewers over the 1.7 changes (trial loop, detection and CLI, tests and docs).
+Every test added or changed was checked to fail on the 0.2.2 code.
+
+- The 1.7 exe name was missing from the "already running" gate's test coverage: only
+  the RimWorldWin64 name was asserted. Added the RimWorld.exe case to
+  `test_user_errors`; on 0.2.2 the run is not refused, so the test fails there.
+- A 1.7 trial whose log never appears (a later unstable build moving
+  `Logs\Player.log`, the likeliest breakage on that branch) used to wait out the
+  whole `--timeout` with a generic "no result". A trial now stops after
+  `log_quiet` seconds (30 by default) when the log file was not touched since the
+  trial started, saying "the game wrote nothing to <path>; a game update may have
+  moved its log". `test_waylith_a_log_that_never_appears_is_no_answer` covers it.
+- On 1.7 the run folder's `trial-XX.log` (the copy target) was not cleared before a
+  trial, so a file left by an interrupted attempt in the same run folder could
+  outlive the trial if the copy failed. It is unlinked like the 1.6 log now.
+- Checked and left alone: the await_rewrite dance cannot swallow a log that grows
+  past the previous one before the first poll (the first size change, in either
+  direction, restarts from zero); `strip_log_line` is anchored, so a 1.6 line that
+  happens to contain a timestamp mid-text is untouched; the guard skips 1.6 paths
+  entirely, and `--help` was re-diffed byte-identical against 0.2.2 after the round.
+- Re-verified live after the round: the 1.7 bisect (run 2026-10-13_14-40-50, 5 trials,
+  exit 0, same culprit and timings) and `python -m pytest`: 245 passed. Function
+  pair check: 204 functions, one pre-existing 0.45 pair in old cli tests.
+
+Incident, 2026-10-13, for the record: between 08:58 and 12:42 the machine stopped
+being able to start the 1.6 snapshot game (Unity/D3D11) with a window. The game hangs
+after "Save data folder overridden" with 1.3s of CPU in a minute, all threads in
+driver/COM waits, and loads mods fine with `-batchmode -nographics`, so the block is
+in the windowed D3D11 present path, not in the game data or rimbisect (0.2.2 hangs
+the same; a raw direct launch hangs the same; an empty Mods folder hangs the same).
+Killing the NVIDIA overlay processes and stopping Steam did not help; the console
+session stayed Active. The Vulkan-based 1.7 game kept working throughout. Presumably
+a display-driver state problem after the day's storm of game launches and kills; a
+reboot should clear it. After a reboot, rerun the 16-mod check and then the 200-mod
+bisect against `.phase0\rimworld16` (commands in the 0.2.2 section; the snapshot
+must exist, see below) and expect the documented results.
+
+Also on this day a parallel agent session worked in `D:\Repos\ideas\rimsave-xray`
+against the same game install; its game launches sat at the menu flooding
+Logs\Player.log (2+ GB each) and had to be stopped several times. On 1.7 that file is
+a single shared resource: nothing automated should run the game while rimbisect does.
+
+Next steps for the owner:
+
+1. Publish 0.3.0 as 0.2.2 was published: wait for CI on the exact commit,
+   `python -m build`, `twine upload dist/*`, tag, `gh run download <id> -n exe`,
+   `gh release create` with wheel, sdist and exe. First distribution step is still
+   the r/RimWorld reply drafted in the 0.2.2 section; on 1.7-launch threads it now
+   also answers "which of my mods broke on Waylith".
+2. After any reboot, redo the 1.6 acceptance against the snapshot if it is still
+   around (`.phase0\rimworld16`, gitignored; remake it with robocopy from a 1.6
+   install if not) to close the regression guard on real hardware.
+3. When Ludeon flips the main branch to 1.7: rerun the 16-mod and 200-mod
+   acceptances on the main install (should be a one-day follow-up; every engine
+   difference is in the table above), re-check that `Version.txt` and the log layout
+   did not change again, and drop "unstable" from the README wording.
+4. The Steam library is still on the `unstable` branch (that is how 1.7 got
+   installed). Betas tab -> "None" puts it back to 1.6 for regular play; Steam is
+   currently sitting at its sign-in window.
+5. Building the probe from source needs a 1.6 install's Managed folder for
+   UnityEngine.CoreModule.dll: `dotnet build -c Release
+   -p:RimWorldManaged=<path>\RimWorldWin64_Data\Managed` in `probe-src`. The shipped
+   DLL is built once and runs on both engines; only rebuild it if a 1.7 update
+   breaks the compatibility layer.
+6. `python acceptance/stage.py remove` removes the brokendef test mods from the real
+   game's Mods folder (currently installed); `.phase0\stage17.py` rebuilds the 1.7
+   16-mod list if needed.
+
 State on 2026-09-30: version 0.2.2 is released, the sixth review round's fixes and small
 guided-mode additions (below) on top of 0.2.1's review fixes and 0.2.0's `resume`, `--save`,
 standalone `rimbisect.exe` and error search by text.

@@ -296,11 +296,15 @@ def test_user_errors(env, tmp_path, capsys):
     assert cli.main(["bisect", *env["args"], "--match", "x"]) == 2
     assert "already running" in capsys.readouterr().err
     env["running"].clear()
+    env["running"].add("RimWorld.exe")  # the 1.7 name alone also blocks the run
+    assert cli.main(["bisect", *env["args"], "--match", "x"]) == 2
+    assert "already running" in capsys.readouterr().err
+    env["running"].clear()
     assert cli.main(["bisect", *env["args"], "--match", "(unclosed"]) == 2
     assert "--match-text" in capsys.readouterr().err
     assert not (env["work"] / "runs").exists()
     assert cli.main(["mods", "--game", str(tmp_path)]) == 2
-    assert "does not contain RimWorldWin64.exe" in capsys.readouterr().err
+    assert "contains neither RimWorldWin64.exe" in capsys.readouterr().err
     assert cli.main(["mods", *env["game"], "--config", str(tmp_path / "nope.xml")]) == 2
     assert "nope.xml: no such file" in capsys.readouterr().err
     with pytest.raises(SystemExit):
@@ -718,7 +722,7 @@ def test_double_click_asks_where_the_game_is(clicked, capsys, monkeypatch):
     monkeypatch.setattr(cli, "find_game", find_game)
     clicked["answers"] = [str(clicked["root"].parent / "nope"), f'"{clicked["root"]}"', "", "1", ""]
     assert cli.main() == 0
-    assert "does not contain RimWorldWin64.exe" in capsys.readouterr().err
+    assert "contains neither RimWorldWin64.exe" in capsys.readouterr().err
     assert json.loads(next((clicked["work"] / "runs").iterdir()).joinpath("run.json").read_text(
         encoding="utf-8"))["args"]["game"] == str(clicked["root"])
 

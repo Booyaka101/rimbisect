@@ -11,7 +11,15 @@ from pathlib import Path
 from .errors import UserError
 
 APP_ID = "294100"
-EXE_NAME = "RimWorldWin64.exe"
+# 1.6 and earlier run RimWorldWin64.exe on Unity; 1.7 on the Waylith engine runs RimWorld.exe.
+EXE_NAMES = ("RimWorldWin64.exe", "RimWorld.exe")
+
+
+def find_exe(root: Path) -> str | None:
+    for name in EXE_NAMES:
+        if (root / name).is_file():
+            return name
+    return None
 
 
 @dataclass(frozen=True)
@@ -21,7 +29,16 @@ class Game:
 
     @property
     def exe(self) -> Path:
-        return self.root / EXE_NAME
+        return self.root / (find_exe(self.root) or EXE_NAMES[0])
+
+    @property
+    def waylith(self) -> bool:
+        """1.7 on the Waylith engine: -logFile is gone and the log always lands in
+        Logs\\Player.log under the player's config folder, truncated at every start."""
+        match = re.match(r"(\d+)\.(\d+)", self.version)
+        if match:
+            return (int(match.group(1)), int(match.group(2))) >= (1, 7)
+        return (self.root / "RimWorld.exe").is_file()
 
     @property
     def short_version(self) -> str:
@@ -113,8 +130,9 @@ def read_version(root: Path) -> str:
 def find_game(explicit: Path | None) -> Game:
     if explicit is not None:
         root = explicit.expanduser().resolve()
-        if not (root / EXE_NAME).is_file():
-            raise UserError(f"{root} does not contain {EXE_NAME}. Pass the RimWorld install folder with --game.")
+        if find_exe(root) is None:
+            raise UserError(f"{root} contains neither {EXE_NAMES[0]} (RimWorld 1.6) nor {EXE_NAMES[1]} "
+                            "(1.7). Pass the RimWorld install folder with --game.")
         return Game(root, read_version(root))
     steam = steam_root()
     if steam is None:
@@ -126,7 +144,7 @@ def find_game(explicit: Path | None) -> Game:
         libraries = [steam]
     for library in libraries:
         root = library / "steamapps" / "common" / "RimWorld"
-        if (root / EXE_NAME).is_file():
+        if find_exe(root) is not None:
             return Game(root, read_version(root))
     raise UserError(f"RimWorld (app {APP_ID}) is not in any Steam library listed in {vdf}. "
                     "Pass the install folder with --game.")
@@ -135,6 +153,13 @@ def find_game(explicit: Path | None) -> Game:
 def default_config_dir() -> Path:
     base = Path(os.environ.get("USERPROFILE", str(Path.home())))
     return base / "AppData" / "LocalLow" / "Ludeon Studios" / "RimWorld by Ludeon Studios" / "Config"
+
+
+def default_player_log() -> Path:
+    """Where 1.7 writes its log no matter what: Logs\\Player.log next to the player's
+    Config folder. 1.6 wrote Player.log directly in that folder, and only when it was
+    started without -logFile."""
+    return default_config_dir().parent / "Logs" / "Player.log"
 
 
 def process_running(image: str) -> bool | None:

@@ -7,13 +7,22 @@ import sys
 import time
 
 args = sys.argv[1:]
-log = open(args[args.index("-logFile") + 1], "a", encoding="utf-8")
+if "-logFile" in args:
+    log = open(args[args.index("-logFile") + 1], "a", encoding="utf-8")
+else:
+    # Waylith (1.7): the log is a fixed file the game truncates at every start.
+    log = open(os.environ["FAKE_PLAYER_LOG"], "w", encoding="utf-8")
 events = open(os.environ["RIMBISECT_EVENTS"], "a", encoding="utf-8")
 with open(os.environ["FAKE_PID_FILE"], "w") as fh:
     fh.write(str(os.getpid()))
 
+waylith = "-logFile" not in args
+
 
 def say(line):
+    if waylith:
+        level = "ERROR" if line.startswith(("XML error", "Crash")) else " INFO"
+        line = f"2026-10-13 12:00:00.000 {level} [Verse] {line}"
     log.write(line + "\n")
     log.flush()
 

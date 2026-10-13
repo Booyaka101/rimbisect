@@ -12,7 +12,7 @@ from fakegame import CRITERION
 from rimbisect.install import Game
 from rimbisect.modlist import CORE, PROBE_ID, ModsConfig
 from rimbisect.signature import Criterion
-from rimbisect.trial import CRASH, FAIL, PASS, UNRESOLVED, GameLauncher, prepare_savedata
+from rimbisect.trial import CRASH, FAIL, PASS, UNRESOLVED, GameLauncher, _Tail, prepare_savedata
 
 SRC = Path(__file__).resolve().parents[1] / "src"
 
@@ -233,3 +233,98 @@ def test_trials_are_numbered_and_logs_kept(launcher, monkeypatch):
     assert (first.number, second.number) == (1, 2)
     assert Path(first.log).name == "trial-01.log" and Path(second.log).is_file()
     assert launcher.trials == [first, second]
+
+
+@dataclass(frozen=True)
+class WaylithGame(Game):
+    @property
+    def exe(self) -> Path:
+        return self.root / "RimWorld.bat"
+
+
+@pytest.fixture
+def waylith(tmp_path, monkeypatch):
+    # 1.7: the game is RimWorld.exe, -logFile is gone and the log lands in one fixed
+    # Player.log that each launch rewrites, which the fake stands in for.
+    root = tmp_path / "RimWorld17"
+    root.mkdir()
+    (root / "RimWorld.exe").write_text("")
+    (root / "RimWorld.bat").write_text(f'@"{sys.executable}" "{FAKE}" %*\n')
+    real = tmp_path / "Config"
+    real.mkdir()
+    (real / "ModsConfig.xml").write_text("the player's own list")
+    (real / "Prefs.xml").write_text("<PrefsData><devMode>True</devMode></PrefsData>")
+    player_log = tmp_path / "Logs" / "Player.log"
+    player_log.parent.mkdir()
+    player_log.write_text("2026-10-13 11:00:00.000 ERROR [Verse] XML error: <rimbisectNoSuchField>1"
+                          "</rimbisectNoSuchField> from the trial before\n", encoding="utf-8")
+    monkeypatch.setattr("rimbisect.trial.default_player_log", lambda: player_log)
+    monkeypatch.setenv("FAKE_PID_FILE", str(tmp_path / "pid"))
+    monkeypatch.setenv("FAKE_PLAYER_LOG", str(player_log))
+    launcher = GameLauncher(WaylithGame(root, "1.7.4976 rev1043"), ModsConfig("1.6.4850 rev646", [], []),
+                            tmp_path / "run", real, settle=1, timeout=20, poll=0.05, log=lambda _: None)
+    (tmp_path / "run").mkdir(exist_ok=True)
+    return launcher
+
+
+def run17(waylith, monkeypatch, scenario, criterion=CRITERION):
+    monkeypatch.setenv("FAKE_SCENARIO", scenario)
+    return waylith.run([CORE, "author.mod", PROBE_ID], scenario, criterion)
+
+
+def test_waylith_passes_and_copies_player_log_into_the_run(waylith, monkeypatch):
+    trial = run17(waylith, monkeypatch, "pass")
+    assert trial.outcome == PASS and trial.ticks == 1200
+    saved = Path(trial.log).read_text(encoding="utf-8")
+    assert "RIMBISECT_DONE" in saved and "from the trial before" not in saved
+
+
+def test_waylith_ignores_the_error_the_previous_trial_left(waylith, monkeypatch):
+    trial = run17(waylith, monkeypatch, "pass", Criterion(pattern=re.compile("rimbisectNoSuchField")))
+    assert trial.outcome == PASS
+
+
+def test_waylith_log_lines_match_behind_their_prefix(waylith, monkeypatch):
+    trial = run17(waylith, monkeypatch, "logline", Criterion(pattern=re.compile("rimbisectNoSuchField")))
+    assert trial.outcome == FAIL and trial.excerpt.startswith("XML error")
+
+
+def test_waylith_probe_lines_do_not_match(waylith, monkeypatch):
+    trial = run17(waylith, monkeypatch, "pass", Criterion(pattern=re.compile("RIMBISECT")))
+    assert trial.outcome == PASS
+
+
+def test_waylith_fallback_line_is_recognized(waylith, monkeypatch):
+    trial = run17(waylith, monkeypatch, "fallback")
+    assert trial.outcome == CRASH and "fell back to Core alone" in trial.excerpt
+
+
+def test_waylith_a_log_that_never_appears_is_no_answer(waylith, monkeypatch, tmp_path):
+    monkeypatch.setenv("FAKE_PLAYER_LOG", str(tmp_path / "elsewhere.log"))  # the game moved its log
+    waylith.log_quiet = 1.0
+    trial = run17(waylith, monkeypatch, "hang", None)
+    assert trial.outcome == UNRESOLVED
+    assert "wrote nothing to" in trial.excerpt and "may have moved its log" in trial.excerpt
+    assert trial.duration < 10  # it did not wait out the 20s timeout
+
+
+def test_tail_waits_for_the_rewriter_to_start_over(tmp_path):
+    path = tmp_path / "Player.log"
+    path.write_bytes(b"old one\nold two\n")
+    tail = _Tail(path, from_end=True)
+    assert tail.lines() == []
+    with open(path, "w", encoding="utf-8") as fh:  # the writer rewrote it, larger than before
+        fh.write("new one\nnew two\nnew three\n")
+    assert tail.lines() == ["new one", "new two", "new three"]
+    with open(path, "a", encoding="utf-8") as fh:
+        fh.write("new four\n")
+    assert tail.lines() == ["new four"]
+
+
+def test_tail_starts_over_when_the_file_shrinks(tmp_path):
+    path = tmp_path / "Player.log"
+    path.write_bytes(b"old one\nold two\nold three\n")
+    tail = _Tail(path)
+    assert tail.lines() == ["old one", "old two", "old three"]
+    path.write_bytes(b"new one\n")  # truncated mid-stream
+    assert tail.lines() == ["new one"]

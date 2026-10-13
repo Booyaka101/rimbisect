@@ -19,7 +19,7 @@ from pathlib import Path
 
 from . import __version__, report, resume
 from .errors import UserError
-from .install import EXE_NAME, Game, default_config_dir, find_game, process_running
+from .install import EXE_NAMES, Game, default_config_dir, find_game, process_running
 from .modlist import PROBE_FOLDER, LoadOrder, ModsConfig, folder_mtime, read_mods_config, scan_mods
 from .search import Inconclusive, Search, run_answered
 from .signature import Criterion, ErrorGroup, group_errors
@@ -70,7 +70,7 @@ def _workdir(args) -> Path:
 
 
 def _preflight(setup: Setup) -> None:
-    if process_running(EXE_NAME):
+    if any(process_running(name) for name in EXE_NAMES):
         raise UserError("RimWorld is already running. Close it first; rimbisect starts and stops the game itself.")
     workshop = setup.game.workshop_dir
     if workshop and process_running("steam.exe") is False:
@@ -687,7 +687,7 @@ def cmd_guided(args) -> int:
             break
         except UserError as exc:
             log(str(exc))
-            bisect.game = Path(_ask("Paste the RimWorld folder, the one with RimWorldWin64.exe in it: "))
+            bisect.game = Path(_ask("Paste the RimWorld folder, the one with RimWorldWin64.exe or RimWorld.exe in it: "))
     _preflight(load(bisect))
     while True:
         bisect.save = _ask("Load a save instead of starting a new colony? Type its name, or press Enter: ") or None

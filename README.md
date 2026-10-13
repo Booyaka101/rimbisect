@@ -15,7 +15,12 @@ which it deletes when the run ends.
 
 ## Install
 
-You need Windows and RimWorld 1.6 from Steam.
+You need Windows, and RimWorld 1.6 or 1.7 from Steam.
+
+| RimWorld | |
+| --- | --- |
+| 1.6 (the main Steam branch) | Fully supported. Everything below was measured on it. |
+| 1.7, Waylith engine (the Steam `unstable` beta) | Supported. The game moved its log and renamed its executable; rimbisect follows both, and reads the log where the game now puts it. A bisect on 1.7-unstable is shown below. If a later unstable build moves the log again, trials say so instead of timing out. To go back to 1.6, pick branch "None" in RimWorld's Betas tab. |
 
 The easy way is `rimbisect.exe` from the
 [latest release](https://github.com/Booyaka101/rimbisect/releases/latest). It needs
@@ -61,8 +66,9 @@ the game, and `rimbisect resume` goes on from there later without running the fi
 trials again. It also picks up a run that died with the PC.
 
 If you already know what the error says, skip the question. `--match-text` takes a piece
-of the error as you see it in the log (`Player.log`, next to the `Config` folder
-mentioned below); `--match` takes a regular expression:
+of the error as you see it in the log (`Player.log`; on 1.6 it sits next to the `Config`
+folder mentioned below, on 1.7 in the `Logs` folder inside it); `--match` takes a regular
+expression:
 
 ```
 rimbisect bisect --match-text "doesn't correspond to any field"
@@ -143,6 +149,26 @@ popup of Achtung and Camera+, which would otherwise have kept the game paused.
 Six of the 200 mods (Core, the five DLCs) are always loaded, so 194 were searched. The run
 folder keeps `report.txt`, `report.json`, the fixed mod list and every trial's log. Old
 run folders are safe to delete.
+
+And this is a bisect on RimWorld 1.7 (the `unstable` beta on the Waylith engine), same
+tool, a 16 mod list with the same kind of test mod at position 12. Trials are quicker:
+1.7 loads in about a third of the time, and the planted error already fails during load:
+
+```
+rimbisect 0.3.0: 16 active mods, 10 to search
+run folder D:\Repos\ideas\rimbisect\.phase0\rb17\runs\2026-10-13_12-41-11
+trial   1  baseline                 16 mods  FAIL          4.1s
+the full list took 4s; expect about 7 more trials for a single culprit, 14 for two mods that only fail together
+trial   2  bisect                   11 mods  PASS         26.4s
+trial   3  bisect                   10 mods  FAIL          3.6s
+trial   4  bisect                    7 mods  FAIL          3.3s
+trial   5  without the culprits     15 mods  PASS         25.2s
+```
+
+with `CULPRIT rimbisect acceptance: broken def (rimbisect.acceptance.brokendef)` in the
+report and exit code 0. On 1.7 the game writes its log to one fixed `Logs\Player.log`
+under your config folder and rewrites it at every start; each trial reads it as the game
+writes it, and the run folder still gets its own copy per trial.
 
 The simplest fix is to disable the culprit in the game's mod manager. The fixed list is
 your list without the culprits and without the mods that need them; to use it, close
@@ -225,6 +251,14 @@ startup in dev mode, so the trial's `Prefs.xml` turns that on, and the copied `C
 leaves out the file the "disable dev mode for good" button writes. The original is never
 opened for writing. If the game still sits at the main menu, the trial stops after about
 ten seconds instead of waiting for `--timeout`.
+
+Where the log goes depends on the game. On 1.6 the trial passes `-logFile` and the game
+writes that trial's own file in the run folder. On 1.7 (Waylith) `-logFile` is gone: the
+game always writes `Logs\Player.log` next to your `Config` folder and rewrites it at
+every start, so each trial tails that file from where the previous run left it, and a
+copy of what the trial saw lands in the run folder when it ends. Every 1.7 log line
+starts with a timestamp, a level and a category; the markers rimbisect looks for are
+read through that prefix, and the game's own error text is unchanged.
 
 For the run, rimbisect copies a small mod, `rimbisect-probe`, into the game's `Mods`
 folder and deletes it afterwards, also on Ctrl+C or when you close rimbisect's window.
@@ -336,7 +370,10 @@ when interrupted.
 
 ## Limitations
 
-- Windows only, and only the Steam version has been tried. The probe is built for 1.6.
+- Windows only, and only the Steam version has been tried. The probe is compiled against
+  the 1.6 assemblies and loads on 1.7 unchanged through the Waylith engine's Unity
+  compatibility redirects; if a future 1.7 build breaks that, the probe source is in
+  `probe-src` in the repository.
 - It finds errors that happen while the game starts and during the first `--settle`
   seconds on a fresh map, or on your save with `--save`. Problems that need a raid or a
   year of play are out of reach.

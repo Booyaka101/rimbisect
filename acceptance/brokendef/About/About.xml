@@ -5,6 +5,7 @@
   <author>Booyaka101</author>
   <supportedVersions>
     <li>1.6</li>
+    <li>1.7</li>
   </supportedVersions>
   <description>Test mod for rimbisect. Its one def has a field that does not exist, so the game logs an XML error at startup.</description>
 </ModMetaData>

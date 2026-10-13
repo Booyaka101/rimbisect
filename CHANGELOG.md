@@ -1,5 +1,29 @@
 # Changelog
 
+## 0.3.0 - 2026-10-13
+
+Runs on RimWorld 1.7 (the `unstable` Steam beta, on the new Waylith engine) with all
+1.6 behavior unchanged. Verified live on 1.7.4976 rev1043; the observed engine
+differences are recorded in PROGRESS.md.
+
+- 1.7's executable is `RimWorld.exe`. Finding the install accepts either it or
+  `RimWorldWin64.exe`, and "RimWorld is already running" now checks both names, since
+  on 1.7 only one game can hold the log at a time.
+- 1.7 ignores `-logFile` and always writes `Logs\Player.log` under the player's config
+  folder, rewriting it at every start. Trials tail that file where it is, notice when
+  the game starts it over, and still leave each trial's own log copy in the run folder.
+- Every 1.7 log line carries a "time level [category]" prefix. `RIMBISECT_DONE`, probe
+  lines, the load-fallback lines and `--match`/`--match-text` are read through it, so
+  both versions' logs work the same way.
+- The version string ("1.7.4976 rev1043") and `<v1.7>` blocks in `About.xml` are read
+  as 1.6's were; `mods` and the reports print 1.7 correctly.
+- The probe mod lists 1.7 in its supportedVersions and runs unchanged on 1.7 through
+  the engine's Unity compatibility redirects; no rebuild was needed.
+- If a later 1.7 build moves `Logs\Player.log` again, a trial stops with "the game
+  wrote nothing to ... a game update may have moved its log" after half a minute
+  instead of waiting out `--timeout`, so an unstable-branch surprise is visible
+  immediately.
+
 ## 0.2.2 - 2026-09-30
 
 A second review pass. Runs started by 0.2.1 can't be resumed with 0.2.2.

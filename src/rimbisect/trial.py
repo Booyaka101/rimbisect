@@ -5,6 +5,7 @@ from __future__ import annotations
 import ctypes
 import json
 import os
+import re
 import shutil
 import signal
 import subprocess
@@ -15,7 +16,7 @@ from pathlib import Path
 from typing import Protocol
 
 from .errors import UserError
-from .install import Game
+from .install import Game, default_player_log
 from .modlist import PROBE_FOLDER, PROBE_ID, ModsConfig
 from .signature import Criterion
 
@@ -24,6 +25,16 @@ DONE_LINE = "RIMBISECT_DONE"
 PROBE_LINE = "RIMBISECT_"
 # When loading throws, the game drops every mod but Core and loads again, without the probe.
 FALLBACK_LINES = ("Caught exception while loading play data", "Could not recover from errors loading play data")
+
+# 1.7 on Waylith prefixes every log line with "2026-10-13 12:19:40.655  INFO [Verse] ";
+# the level is right-aligned in five characters, and the category can be empty.
+WAYLITH_LINE = re.compile(r"^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}\.\d+ +"
+                          r"(?:INFO|WARN|ERROR|FATAL|DEBUG|TRACE) +(?:\[[^\]]*\] )?")
+
+
+def strip_log_line(line: str) -> str:
+    """The line as 1.6 wrote it, so the markers and matches below mean the same on both."""
+    return WAYLITH_LINE.sub("", line, count=1) if line[:2] == "20" else line
 
 # Unattended trials must keep running without focus; the rest just keeps them out of the way.
 PREF_OVERRIDES = {
@@ -239,15 +250,32 @@ def kill_tree(proc: subprocess.Popen, job: Job | None = None) -> None:
 class _Tail:
     """New complete lines appended to a file since the last read."""
 
-    def __init__(self, path: Path):
+    def __init__(self, path: Path, from_end: bool = False):
         self.path = path
         self.offset = 0
         self.partial = b""
+        self.await_rewrite = False
+        if from_end:
+            # The writer rewrites this file from the start (1.7 truncates Player.log on
+            # every launch). Skip what is in it now; the first size change is the new
+            # run beginning, whenever it happens.
+            try:
+                self.offset = path.stat().st_size
+                self.await_rewrite = True
+            except OSError:
+                pass
 
     def lines(self, final: bool = False) -> list[str]:
         """With final, the file is complete and an unterminated last line counts too."""
         try:
             with open(self.path, "rb") as fh:
+                fh.seek(0, 2)
+                size = fh.tell()
+                if self.await_rewrite:
+                    if size != self.offset:
+                        self.offset, self.partial, self.await_rewrite = 0, b"", False
+                elif size < self.offset:  # the file was truncated; start over
+                    self.offset, self.partial = 0, b""
                 fh.seek(self.offset)
                 data = fh.read()
         except OSError:
@@ -277,6 +305,10 @@ class GameLauncher:
         self.poll = poll
         self.log = log
         self.save = save
+        # On Waylith the log is a fixed file the game truncates at every start; the
+        # per-trial copy in the run folder is made when the trial ends.
+        self.player_log = default_player_log() if game.waylith else None
+        self.log_quiet = 30.0  # seconds before a 1.7 trial gives up on a log that never appeared
         self.trials: list[Trial] = []
         self.numbered = 0
         self.not_loaded_at_first: set[str] | None = None
@@ -298,8 +330,8 @@ class GameLauncher:
         self.trials.append(trial)
         stem = self.run_dir / f"trial-{trial.number:02d}"
         log_path, events_path = stem.with_suffix(".log").resolve(), stem.with_suffix(".events.jsonl").resolve()
-        for path in (log_path, events_path):
-            path.unlink(missing_ok=True)
+        log_path.unlink(missing_ok=True)  # on 1.7 this is the copy target; Player.log itself is only read
+        events_path.unlink(missing_ok=True)
         trial.log = str(log_path)
         try:
             prepare_savedata(self.real_config_dir, self.savedata, self.save)
@@ -311,14 +343,17 @@ class GameLauncher:
         env = dict(os.environ, RIMBISECT_EVENTS=str(events_path), RIMBISECT_SETTLE=str(self.settle))
         if self.save:
             env["RIMBISECT_SAVE"] = "1"
+        live_log = self.player_log or log_path
         args = [str(self.game.exe), f"-savedatafolder={self.savedata.as_posix()}",
-                *([] if self.save else ["-quicktest"]), "-logFile", str(log_path)]
+                *([] if self.save else ["-quicktest"]),
+                *([] if self.player_log else ["-logFile", str(log_path)])]
         started = time.monotonic()
+        started_wall = time.time()
         proc = subprocess.Popen(args, cwd=str(self.game.root), env=env,
                                 stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         job = Job.holding(proc.pid)
         self.proc, self.job = proc, job
-        log_tail, events_tail = _Tail(log_path), _Tail(events_path)
+        log_tail, events_tail = _Tail(live_log, from_end=self.player_log is not None), _Tail(events_path)
         recent: list[str] = []
         done = log_done = loaded = False
         unloaded: str | None = None
@@ -326,12 +361,13 @@ class GameLauncher:
 
         def read_log(final: bool) -> None:
             nonlocal recent, log_done, gave_up
-            for line in log_tail.lines(final):
+            for raw in log_tail.lines(final):
+                line = strip_log_line(raw)
                 if log_done or line == DONE_LINE:
                     log_done = True
                     return
                 if line.strip("= \t"):  # Mono's crash banner is mostly rules and blank lines.
-                    recent = (recent + [line])[-40:]
+                    recent = (recent + [raw])[-40:]
                 if line.startswith(PROBE_LINE):
                     continue
                 if line.startswith(FALLBACK_LINES) and gave_up is None:
@@ -407,6 +443,15 @@ class GameLauncher:
                     trial.outcome = CRASH
                     trial.excerpt = "\n".join([_exit_line(proc.returncode)] + recent[-10:])
                     break
+                # 1.7 writes its log banner within seconds of starting. A Player.log
+                # untouched since before the trial means the game moved it, and every
+                # further poll would be blind; say so instead of waiting out --timeout.
+                if (self.player_log is not None and elapsed > self.log_quiet
+                        and _untouched_since(live_log, started_wall)):
+                    trial.outcome = UNRESOLVED
+                    trial.excerpt = (f"the game wrote nothing to {live_log}; "
+                                     "a game update may have moved its log")
+                    break
                 if elapsed > self.timeout:
                     trial.outcome = UNRESOLVED
                     trial.excerpt = f"no result after {self.timeout:g}s\n" + "\n".join(recent[-10:])
@@ -420,6 +465,11 @@ class GameLauncher:
                 except subprocess.TimeoutExpired:
                     pass
             kill_tree(proc, job)
+        if self.player_log is not None:
+            try:
+                shutil.copyfile(self.player_log, log_path)
+            except OSError:
+                trial.log = str(self.player_log)  # the report then points at the live log
         if self.stopped:
             trial.outcome, trial.excerpt = UNRESOLVED, "stopped"
         return trial
@@ -445,6 +495,14 @@ def _parse_event(raw: str) -> dict | None:
     except ValueError:
         return None
     return event if isinstance(event, dict) else None
+
+
+def _untouched_since(path: Path, moment: float) -> bool:
+    """Whether the file is missing or was last written before the trial started."""
+    try:
+        return path.stat().st_mtime < moment
+    except OSError:
+        return True
 
 
 def _exit_line(code: int) -> str:
